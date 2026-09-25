@@ -22,6 +22,17 @@ final class AirPlayRouteManager: ObservableObject {
     @Published private(set) var isConnected: Bool = false
     @Published private(set) var activeSpeakerName: String?
 
+    private let stateLock = NSLock()
+    private var cachedSpeakerName: String?
+    private var cachedIsConnected: Bool = false
+
+    /// Thread-safe accessor for the active AirPlay speaker name.
+    var currentSpeakerName: String? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return cachedSpeakerName
+    }
+
     private var routingContext: NSObject?
     private weak var activePickerView: NSView?
     private var pollTimer: Timer?
@@ -154,10 +165,17 @@ final class AirPlayRouteManager: ObservableObject {
         let hasDevice = context.responds(to: outputDevSel) && msgObjReturn(context, outputDevSel) != nil
         let connected = hasDevice && name != nil
 
-        if self.isConnected != connected {
+        stateLock.lock()
+        let connectedChanged = cachedIsConnected != connected
+        let nameChanged = cachedSpeakerName != name
+        cachedIsConnected = connected
+        cachedSpeakerName = name
+        stateLock.unlock()
+
+        if connectedChanged {
             self.isConnected = connected
         }
-        if self.activeSpeakerName != name {
+        if nameChanged {
             self.activeSpeakerName = name
         }
     }
