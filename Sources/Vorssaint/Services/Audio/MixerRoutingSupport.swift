@@ -227,7 +227,7 @@ enum MixerRoutingSupport {
     static func effectiveDeviceUID(selectedUID: String?,
                                    availableUIDs: Set<String>,
                                    defaultUID: String?) -> String? {
-        if let selectedUID, availableUIDs.contains(selectedUID) {
+        if let selectedUID, availableUIDs.contains(selectedUID) || isAirPlayUID(selectedUID) {
             return selectedUID
         }
         return defaultUID
@@ -236,6 +236,7 @@ enum MixerRoutingSupport {
     static func selectedDeviceUnavailable(selectedUID: String?,
                                           availableUIDs: Set<String>) -> Bool {
         guard let selectedUID else { return false }
+        if isAirPlayUID(selectedUID) { return false }
         return !availableUIDs.contains(selectedUID)
     }
 
