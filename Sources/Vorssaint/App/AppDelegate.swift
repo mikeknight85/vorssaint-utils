@@ -973,7 +973,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
         ) { [weak self] _ in
             guard let self, self.popover.isShown else { return }
             guard !PanelInteractionState.shared.preventsPopoverDismissal else { return }
-            guard self.statusController.containsStatusItem(at: NSEvent.mouseLocation) == false else { return }
+            let mouseLoc = NSEvent.mouseLocation
+            guard self.statusController.containsStatusItem(at: mouseLoc) == false else { return }
+            // Ignore events delivered to remote views or child popovers (like the system
+            // AirPlay route picker) which appear in global monitors because they are rendered out-of-process.
+            if NSApplication.shared.windows.contains(where: { $0.isVisible && $0.frame.contains(mouseLoc) }) {
+                return
+            }
             self.closePopover()
         }
  

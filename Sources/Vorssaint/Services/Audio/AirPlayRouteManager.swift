@@ -14,7 +14,7 @@ import ObjectiveC
 /// Discovers and connects AirPlay devices using the system's trusted routing
 /// stack (`AVOutputContext` / `AVRoutePickerView`), bypassing Core Audio HAL's
 /// inability to enumerate offline AirPlay endpoints.
-final class AirPlayRouteManager: ObservableObject {
+final class AirPlayRouteManager: NSObject, ObservableObject {
     static let shared = AirPlayRouteManager()
 
     /// Virtual UID used by Vorssaint to represent an AirPlay output route.
@@ -23,6 +23,7 @@ final class AirPlayRouteManager: ObservableObject {
     @Published private(set) var isAvailable: Bool = false
     @Published private(set) var isConnected: Bool = false
     @Published private(set) var activeSpeakerName: String?
+    @Published private(set) var isPresentingPicker: Bool = false
 
     private let stateLock = NSLock()
     private var cachedSpeakerName: String?
@@ -45,7 +46,8 @@ final class AirPlayRouteManager: ObservableObject {
 
     private let msgSendSym = dlsym(dlopen(nil, RTLD_NOW), "objc_msgSend")
 
-    private init() {
+    private override init() {
+        super.init()
         dlopen("/System/Library/Frameworks/AVKit.framework/AVKit", RTLD_NOW)
         dlopen("/System/Library/Frameworks/AVFoundation.framework/AVFoundation", RTLD_NOW)
         self.isAvailable = NSClassFromString("AVOutputContext") != nil
@@ -79,6 +81,7 @@ final class AirPlayRouteManager: ObservableObject {
         if let ctxID = context.value(forKey: "ID") as? String, picker.responds(to: setCtxSel) {
             msgObj(picker, setCtxSel, ctxID as AnyObject)
         }
+        picker.delegate = self
         if isActive {
             self.activePickerView = picker
         }
@@ -572,5 +575,19 @@ final class AirPlayRenderer: @unchecked Sendable {
 
         nextPTS = CMTimeAdd(nextPTS, CMTime(value: CMTimeValue(frames), timescale: CMTimeScale(sampleRate)))
         return buffer
+    }
+}
+
+extension AirPlayRouteManager: AVRoutePickerViewDelegate {
+    func routePickerViewWillBeginPresentingRoutes(_ routePickerView: AVRoutePickerView) {
+        self.isPresentingPicker = true
+    }
+
+    func routePickerViewDidEndPresentingRoutes(_ routePickerView: AVRoutePickerView) {
+        refreshActiveDevice()
+        // Keep flag briefly active so any click that dismissed the picker does not simultaneously drop the panel
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+            self?.isPresentingPicker = false
+        }
     }
 }
