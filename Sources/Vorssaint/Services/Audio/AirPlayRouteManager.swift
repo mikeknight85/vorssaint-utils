@@ -91,37 +91,77 @@ final class AirPlayRouteManager: ObservableObject {
     }
 
     private var fallbackWindow: NSWindow?
+    private var fallbackPopoverObserver: NSObjectProtocol?
 
-    /// Programmatically opens the system route picker anchored to a lightweight popup at the mouse cursor.
+    /// Programmatically opens the system route picker anchored to the active picker view,
+    /// or anchors an invisible transient popup at the mouse cursor if no UI picker is currently mounted.
     func presentPicker() {
-        let mouseLoc = NSEvent.mouseLocation
-        let window: NSWindow
-        if let existing = fallbackWindow {
-            window = existing
-            window.setFrameOrigin(NSPoint(x: mouseLoc.x - 10, y: mouseLoc.y - 10))
-        } else {
-            let win = NSWindow(
-                contentRect: NSRect(x: mouseLoc.x - 10, y: mouseLoc.y - 10, width: 20, height: 20),
-                styleMask: .borderless,
-                backing: .buffered,
-                defer: false
-            )
-            win.isOpaque = false
-            win.backgroundColor = .clear
-            win.level = .floating
-            win.hasShadow = false
-            win.isReleasedWhenClosed = false
-            if let picker = makeRoutePickerView(isActive: false) {
-                picker.frame = NSRect(x: 0, y: 0, width: 20, height: 20)
-                win.contentView?.addSubview(picker)
-            }
-            self.fallbackWindow = win
-            window = win
+        if let picker = activePickerView, picker.window != nil, let button = findButton(in: picker) {
+            button.performClick(nil)
+            return
         }
 
-        window.orderFront(nil)
-        if let picker = window.contentView?.subviews.first, let button = findButton(in: picker) {
-            button.performClick(nil)
+        if let obs = fallbackPopoverObserver {
+            NotificationCenter.default.removeObserver(obs)
+            fallbackPopoverObserver = nil
+        }
+        fallbackWindow?.orderOut(nil)
+        fallbackWindow = nil
+
+        let mouseLoc = NSEvent.mouseLocation
+        let win = NSWindow(
+            contentRect: NSRect(x: mouseLoc.x - 10, y: mouseLoc.y - 10, width: 20, height: 20),
+            styleMask: .borderless,
+            backing: .buffered,
+            defer: false
+        )
+        win.isOpaque = false
+        win.backgroundColor = .clear
+        win.alphaValue = 0.01 // Invisible so no icon shows on screen
+        win.level = .popUpMenu // Appears on top of all panels and notch, never underneath
+        win.hasShadow = false
+        win.isReleasedWhenClosed = false
+
+        if let picker = makeRoutePickerView(isActive: false) {
+            picker.frame = NSRect(x: 0, y: 0, width: 20, height: 20)
+            win.contentView?.addSubview(picker)
+            win.orderFront(nil)
+            self.fallbackWindow = win
+
+            self.fallbackPopoverObserver = NotificationCenter.default.addObserver(
+                forName: NSPopover.didCloseNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self, weak win] notif in
+                guard let pop = notif.object as? NSPopover,
+                      let vc = pop.contentViewController,
+                      String(describing: type(of: vc)).contains("RoutePicker") else {
+                    return
+                }
+                // Dismiss asynchronously so AppKit can finish its popover teardown
+                DispatchQueue.main.async {
+                    win?.orderOut(nil)
+                    if self?.fallbackWindow === win {
+                        self?.fallbackWindow = nil
+                    }
+                    if let obs = self?.fallbackPopoverObserver {
+                        NotificationCenter.default.removeObserver(obs)
+                        self?.fallbackPopoverObserver = nil
+                    }
+                }
+            }
+
+            // Watchdog to ensure temporary window is cleaned up eventually
+            DispatchQueue.main.asyncAfter(deadline: .now() + 180) { [weak self, weak win] in
+                if self?.fallbackWindow === win {
+                    win?.orderOut(nil)
+                    self?.fallbackWindow = nil
+                }
+            }
+
+            if let button = findButton(in: picker) {
+                button.performClick(nil)
+            }
         }
     }
 

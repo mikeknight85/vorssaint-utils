@@ -5,19 +5,38 @@ import AppKit
 import AVKit
 import SwiftUI
 
+/// Embeds the native macOS AirPlay route picker view in SwiftUI.
+///
+/// Binds to `AirPlayRouteManager`'s shared output context so user selections
+/// route system audio to the chosen HomePod, Apple TV, or AirPlay receiver.
+struct AirPlayRoutePickerRepresentable: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        let container = NSView()
+        if let picker = AirPlayRouteManager.shared.makeRoutePickerView() {
+            picker.translatesAutoresizingMaskIntoConstraints = false
+            container.addSubview(picker)
+            NSLayoutConstraint.activate([
+                picker.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+                picker.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+                picker.topAnchor.constraint(equalTo: container.topAnchor),
+                picker.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            ])
+        }
+        return container
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {}
+}
+
 /// A compact AirPlay button suitable for the mixer panel header and output switcher.
 struct AirPlayPickerButton: View {
     @ObservedObject private var manager = AirPlayRouteManager.shared
 
     var body: some View {
         if manager.isAvailable {
-            Button(action: { manager.presentPicker() }) {
-                Image(systemName: manager.isConnected ? "airplayaudio.circle.fill" : "airplayaudio")
-                    .font(.system(size: 13, weight: .regular))
-                    .foregroundStyle(manager.isConnected ? .primary : .secondary)
-            }
-            .buttonStyle(.plain)
-            .help(manager.activeSpeakerName.map { "AirPlay: \($0)" } ?? "Choose AirPlay speaker…")
+            AirPlayRoutePickerRepresentable()
+                .frame(width: 24, height: 22)
+                .help(manager.activeSpeakerName.map { "AirPlay: \($0)" } ?? "Choose AirPlay speaker…")
         }
     }
 }
