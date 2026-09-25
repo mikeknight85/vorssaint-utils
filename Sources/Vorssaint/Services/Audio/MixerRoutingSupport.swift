@@ -246,19 +246,30 @@ enum MixerRoutingSupport {
                                volumes: volumes)
     }
 
+    static func isAirPlayUID(_ uid: String) -> Bool {
+        uid == AirPlayRouteManager.airPlaySentinelUID || uid.lowercased().contains("airplay")
+    }
+
+    static func matchingDeviceUID(currentUID: String?, candidateUID: String) -> Bool {
+        guard let currentUID else { return false }
+        if currentUID == candidateUID { return true }
+        if isAirPlayUID(currentUID) && isAirPlayUID(candidateUID) { return true }
+        return false
+    }
+
     static func nextSelectedOutputDeviceUID(currentUID: String?,
                                             selectedUIDs: [String],
                                             availableUIDs: Set<String>) -> String? {
         var seen = Set<String>()
         let candidates = selectedUIDs.compactMap { rawUID -> String? in
             guard let uid = sanitizedDeviceUID(rawUID),
-                  availableUIDs.contains(uid),
+                  availableUIDs.contains(uid) || isAirPlayUID(uid),
                   seen.insert(uid).inserted else { return nil }
             return uid
         }
         guard !candidates.isEmpty else { return nil }
         guard let currentUID,
-              let index = candidates.firstIndex(of: currentUID) else {
+              let index = candidates.firstIndex(where: { matchingDeviceUID(currentUID: currentUID, candidateUID: $0) }) else {
             return candidates[0]
         }
         guard candidates.count > 1 else { return nil }

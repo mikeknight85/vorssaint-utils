@@ -622,6 +622,15 @@ final class AppVolumeMixer: ObservableObject {
 
     @discardableResult
     private func setDefaultOutputDeviceUID(_ uid: String) -> Bool {
+        if uid == AirPlayRouteManager.airPlaySentinelUID {
+            outputSwitchError = nil
+            refresh.discardInFlight()
+            AirPlayRouteManager.shared.presentPicker()
+            currentOutputDeviceUID = uid
+            refreshApps()
+            return true
+        }
+
         guard let sanitized = Defaults.sanitizedAppOutputDeviceUID(uid),
               let device = outputDevices.first(where: { $0.uid == sanitized && $0.canBeDefaultOutput }) else {
             outputSwitchError = L10n.shared.s.mixerOutputUnavailable
@@ -685,6 +694,15 @@ final class AppVolumeMixer: ObservableObject {
 
     @discardableResult
     func setSystemSoundOutputDeviceUID(_ uid: String) -> Bool {
+        if uid == AirPlayRouteManager.airPlaySentinelUID {
+            outputSwitchError = nil
+            refresh.discardInFlight()
+            AirPlayRouteManager.shared.presentPicker()
+            currentSystemSoundOutputDeviceUID = uid
+            refreshApps()
+            return true
+        }
+
         guard let sanitized = Defaults.sanitizedAppOutputDeviceUID(uid),
               let device = outputDevices.first(where: {
                   $0.uid == sanitized && $0.canBeDefaultSystemOutput
@@ -1704,9 +1722,15 @@ final class AppVolumeMixer: ObservableObject {
             var transportType: UInt32 = 0
             _ = read(deviceID, kAudioDevicePropertyTransportType, &transportType)
 
+            var displayName = name
+            if (transportType == kAudioDeviceTransportTypeAirPlay || MixerRoutingSupport.isAirPlayUID(uid)),
+               let speakerName = AirPlayRouteManager.shared.activeSpeakerName, !speakerName.isEmpty {
+                displayName = "\(speakerName) (AirPlay)"
+            }
+
             devices.append(MixerOutputDevice(id: uid,
                                              uid: uid,
-                                             name: name,
+                                             name: displayName,
                                              isDefault: uid == defaultUID,
                                              isHeadphones: MixerRoutingSupport.outputLooksLikeHeadphones(
                                                 name: name,
@@ -1717,6 +1741,24 @@ final class AppVolumeMixer: ObservableObject {
                                              priorityTier: MixerRoutingSupport.PriorityTier(
                                                 transportType: transportType),
                                              audioObjectID: deviceID))
+        }
+
+        if AirPlayRouteManager.shared.isAvailable && !devices.contains(where: { MixerRoutingSupport.isAirPlayUID($0.uid) }) {
+            let airPlayName: String
+            if let active = AirPlayRouteManager.shared.activeSpeakerName, !active.isEmpty {
+                airPlayName = "\(active) (AirPlay)"
+            } else {
+                airPlayName = L10n.shared.s.mixerAirPlaySpeaker
+            }
+            devices.append(MixerOutputDevice(id: AirPlayRouteManager.airPlaySentinelUID,
+                                             uid: AirPlayRouteManager.airPlaySentinelUID,
+                                             name: airPlayName,
+                                             isDefault: defaultUID == AirPlayRouteManager.airPlaySentinelUID,
+                                             isHeadphones: false,
+                                             canBeDefaultOutput: true,
+                                             canBeDefaultSystemOutput: true,
+                                             priorityTier: .hardware,
+                                             audioObjectID: 0))
         }
 
         return devices.sorted { lhs, rhs in
