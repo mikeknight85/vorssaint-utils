@@ -458,20 +458,29 @@ final class AirPlayRenderer: @unchecked Sendable {
         _ = manager.bindOutputContext(to: renderer)
     }
 
+    private var feedTimer: DispatchSourceTimer?
+
     func start() {
         guard !started else { return }
         started = true
         nextPTS = CMTime.zero
-        renderer.requestMediaDataWhenReady(on: feedQueue) { [weak self] in
+
+        synchronizer.setRate(1.0, time: .zero)
+
+        let timer = DispatchSource.makeTimerSource(queue: feedQueue)
+        timer.schedule(deadline: .now(), repeating: .milliseconds(25))
+        timer.setEventHandler { [weak self] in
             self?.provide()
         }
-        synchronizer.setRate(1.0, time: .zero)
+        timer.resume()
+        self.feedTimer = timer
     }
 
     func stop() {
         guard started else { return }
         started = false
-        renderer.stopRequestingMediaData()
+        feedTimer?.cancel()
+        feedTimer = nil
         renderer.flush()
         synchronizer.rate = 0
     }
