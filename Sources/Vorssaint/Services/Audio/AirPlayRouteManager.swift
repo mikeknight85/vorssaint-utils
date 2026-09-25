@@ -92,36 +92,36 @@ final class AirPlayRouteManager: ObservableObject {
 
     private var fallbackWindow: NSWindow?
 
-    /// Programmatically opens the system route picker anchored to the active picker view,
-    /// or anchors a lightweight popup at the mouse cursor if no UI picker is currently mounted.
+    /// Programmatically opens the system route picker anchored to a lightweight popup at the mouse cursor.
     func presentPicker() {
-        if let picker = activePickerView, picker.window != nil, let button = findButton(in: picker) {
-            button.performClick(nil)
-            return
+        let mouseLoc = NSEvent.mouseLocation
+        let window: NSWindow
+        if let existing = fallbackWindow {
+            window = existing
+            window.setFrameOrigin(NSPoint(x: mouseLoc.x - 10, y: mouseLoc.y - 10))
+        } else {
+            let win = NSWindow(
+                contentRect: NSRect(x: mouseLoc.x - 10, y: mouseLoc.y - 10, width: 20, height: 20),
+                styleMask: .borderless,
+                backing: .buffered,
+                defer: false
+            )
+            win.isOpaque = false
+            win.backgroundColor = .clear
+            win.level = .floating
+            win.hasShadow = false
+            win.isReleasedWhenClosed = false
+            if let picker = makeRoutePickerView(isActive: false) {
+                picker.frame = NSRect(x: 0, y: 0, width: 20, height: 20)
+                win.contentView?.addSubview(picker)
+            }
+            self.fallbackWindow = win
+            window = win
         }
 
-        fallbackWindow?.close()
-        fallbackWindow = nil
-
-        let mouseLoc = NSEvent.mouseLocation
-        let window = NSWindow(
-            contentRect: NSRect(x: mouseLoc.x - 10, y: mouseLoc.y - 10, width: 20, height: 20),
-            styleMask: .borderless,
-            backing: .buffered,
-            defer: false
-        )
-        window.isOpaque = false
-        window.backgroundColor = .clear
-        window.level = .floating
-
-        if let picker = makeRoutePickerView(isActive: false) {
-            picker.frame = NSRect(x: 0, y: 0, width: 20, height: 20)
-            window.contentView?.addSubview(picker)
-            window.orderFront(nil)
-            self.fallbackWindow = window
-            if let button = findButton(in: picker) {
-                button.performClick(nil)
-            }
+        window.orderFront(nil)
+        if let picker = window.contentView?.subviews.first, let button = findButton(in: picker) {
+            button.performClick(nil)
         }
     }
 

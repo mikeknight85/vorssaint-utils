@@ -976,7 +976,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
             guard self.statusController.containsStatusItem(at: NSEvent.mouseLocation) == false else { return }
             self.closePopover()
         }
-
+ 
         // Local events cover our own Settings window. Keep Settings + panel open
         // when they sit side by side for live reordering, but close the panel if it
         // overlaps Settings and the user clicks Settings to get it out of the way.
@@ -1108,11 +1108,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
 
         popoverIsClosing = true
         if animated {
-            popover.performClose(nil)
+            popover.close()
         } else {
             popover.animates = false
             popover.close()
             popover.animates = true
+        }
+
+        // Safety watchdog: If popover remains shown or didClose never fired within 0.5s,
+        // clear popoverIsClosing so subsequent clicks or close requests are never blocked.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            guard let self else { return }
+            if self.popoverIsClosing && self.popover.isShown {
+                self.popoverIsClosing = false
+                self.popoverCloseIsAppRequested = false
+            }
         }
     }
 
