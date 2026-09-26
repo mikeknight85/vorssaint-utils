@@ -281,66 +281,73 @@ final class AirPlayRouteManager: NSObject, ObservableObject {
 
 /// Lock-free single-producer / single-consumer ring buffer for interleaved stereo Float32 frames.
 /// Realtime-safe for the Core Audio IO proc producer.
+///
+/// Positions are 64-bit frame counts that only ever grow, so they never wrap
+/// in practice (a 32-bit count overflowed after about 12 hours at 48 kHz).
+/// Positions and samples live in manually allocated memory: the IO thread
+/// never goes through Swift array or property access.
 final class AudioRingBuffer: @unchecked Sendable {
     let sampleRate: Double
     private let capacityFrames: Int
-    private var storage: [Float]
+    private let storage: UnsafeMutablePointer<Float>
+    /// [0] = next frame to read (consumer), [1] = next frame to write (producer).
+    private let positions: UnsafeMutablePointer<Int64>
 
-    private var head: Int32 = 0
-    private var tail: Int32 = 0
-
-    init(sampleRate: Double = 44_100, capacityFrames: Int = 1 << 16) {
+    /// `startingFramePosition` exists for tests that exercise long-running streams.
+    init(sampleRate: Double = 44_100, capacityFrames: Int = 1 << 16, startingFramePosition: Int64 = 0) {
         self.sampleRate = sampleRate > 0 ? sampleRate : 44_100
         var cap = 1
         while cap < capacityFrames { cap <<= 1 }
         self.capacityFrames = cap
-        self.storage = [Float](repeating: 0, count: cap * 2)
+        storage = .allocate(capacity: cap * 2)
+        storage.initialize(repeating: 0, count: cap * 2)
+        positions = .allocate(capacity: 2)
+        positions.initialize(repeating: startingFramePosition, count: 2)
     }
+
+    deinit {
+        storage.deallocate()
+        positions.deallocate()
+    }
+
+    private var head: UnsafeMutablePointer<Int64> { positions }
+    private var tail: UnsafeMutablePointer<Int64> { positions + 1 }
 
     /// Producer: Called from Core Audio realtime IO thread. Zero allocations, no locks.
     func write(frames: UnsafePointer<Float>, frameCount: Int, gain: Float) {
-        let t = OSAtomicAdd32Barrier(0, &tail)
-        let h = OSAtomicAdd32Barrier(0, &head)
+        let t = OSAtomicAdd64Barrier(0, tail)
+        let h = OSAtomicAdd64Barrier(0, head)
         let available = capacityFrames - Int(t - h)
         let count = min(frameCount, available)
         guard count > 0 else { return }
 
-        let mask = capacityFrames - 1
-        storage.withUnsafeMutableBufferPointer { buf in
-            guard let base = buf.baseAddress else { return }
-            for i in 0..<count {
-                let slot = ((Int(t) + i) & mask) * 2
-                base[slot] = frames[i * 2] * gain
-                base[slot + 1] = frames[i * 2 + 1] * gain
-            }
+        let mask = Int64(capacityFrames - 1)
+        for i in 0..<count {
+            let slot = Int((t + Int64(i)) & mask) * 2
+            storage[slot] = frames[i * 2] * gain
+            storage[slot + 1] = frames[i * 2 + 1] * gain
         }
-        _ = OSAtomicAdd32Barrier(Int32(count), &tail)
+        _ = OSAtomicAdd64Barrier(Int64(count), tail)
     }
 
     /// Consumer: Called from the AirPlay streaming feed queue.
     @discardableResult
     func read(into destination: UnsafeMutablePointer<Float>, frameCount: Int) -> Int {
-        let h = OSAtomicAdd32Barrier(0, &head)
-        let t = OSAtomicAdd32Barrier(0, &tail)
-        let available = Int(t - h)
-        let count = min(frameCount, available)
+        let h = OSAtomicAdd64Barrier(0, head)
+        let t = OSAtomicAdd64Barrier(0, tail)
+        let count = min(frameCount, Int(t - h))
 
-        let mask = capacityFrames - 1
-        storage.withUnsafeBufferPointer { buf in
-            guard let base = buf.baseAddress else { return }
-            for i in 0..<count {
-                let slot = ((Int(h) + i) & mask) * 2
-                destination[i * 2] = base[slot]
-                destination[i * 2 + 1] = base[slot + 1]
-            }
+        let mask = Int64(capacityFrames - 1)
+        for i in 0..<count {
+            let slot = Int((h + Int64(i)) & mask) * 2
+            destination[i * 2] = storage[slot]
+            destination[i * 2 + 1] = storage[slot + 1]
         }
         if count < frameCount {
-            for i in (count * 2)..<(frameCount * 2) {
-                destination[i] = 0
-            }
+            (destination + count * 2).update(repeating: 0, count: (frameCount - count) * 2)
         }
         if count > 0 {
-            _ = OSAtomicAdd32Barrier(Int32(count), &head)
+            _ = OSAtomicAdd64Barrier(Int64(count), head)
         }
         return count
     }
