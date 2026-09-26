@@ -633,15 +633,6 @@ final class AppVolumeMixer: ObservableObject {
 
     @discardableResult
     private func setDefaultOutputDeviceUID(_ uid: String) -> Bool {
-        if uid == AirPlayRouteManager.airPlaySentinelUID {
-            outputSwitchError = nil
-            refresh.discardInFlight()
-            AirPlayRouteManager.shared.presentPicker()
-            currentOutputDeviceUID = uid
-            refreshApps()
-            return true
-        }
-
         guard let sanitized = Defaults.sanitizedAppOutputDeviceUID(uid),
               let device = outputDevices.first(where: { $0.uid == sanitized && $0.canBeDefaultOutput }) else {
             outputSwitchError = L10n.shared.s.mixerOutputUnavailable
@@ -707,15 +698,6 @@ final class AppVolumeMixer: ObservableObject {
 
     @discardableResult
     func setSystemSoundOutputDeviceUID(_ uid: String) -> Bool {
-        if uid == AirPlayRouteManager.airPlaySentinelUID {
-            outputSwitchError = nil
-            refresh.discardInFlight()
-            AirPlayRouteManager.shared.presentPicker()
-            currentSystemSoundOutputDeviceUID = uid
-            refreshApps()
-            return true
-        }
-
         guard let sanitized = Defaults.sanitizedAppOutputDeviceUID(uid),
               let device = outputDevices.first(where: {
                   $0.uid == sanitized && $0.canBeDefaultSystemOutput
@@ -1781,7 +1763,9 @@ final class AppVolumeMixer: ObservableObject {
         }
 
         // Always listed while the picker API exists, next to any AirPlay device
-        // macOS itself exposes: the two are different routes.
+        // macOS itself exposes: the two are different routes. It is a per-app
+        // route only: picking a speaker never moves the Mac's own output, so it
+        // is never offered as the system, alert-sound or priority output.
         if AirPlayRouteManager.isListed {
             let airPlayName: String
             if let active = AirPlayRouteManager.currentSpeakerName, !active.isEmpty {
@@ -1792,10 +1776,10 @@ final class AppVolumeMixer: ObservableObject {
             devices.append(MixerOutputDevice(id: AirPlayRouteManager.airPlaySentinelUID,
                                              uid: AirPlayRouteManager.airPlaySentinelUID,
                                              name: airPlayName,
-                                             isDefault: defaultUID == AirPlayRouteManager.airPlaySentinelUID,
+                                             isDefault: false,
                                              isHeadphones: false,
-                                             canBeDefaultOutput: true,
-                                             canBeDefaultSystemOutput: true,
+                                             canBeDefaultOutput: false,
+                                             canBeDefaultSystemOutput: false,
                                              priorityTier: .hardware,
                                              audioObjectID: 0))
         }

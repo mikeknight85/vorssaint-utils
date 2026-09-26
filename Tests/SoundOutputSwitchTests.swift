@@ -23,32 +23,17 @@ enum SoundOutputSwitchContract {
                      && mixer.switchedTo == ["ExternalDisplay"],
                      "two selected outputs still switch to the next one")
 
-        // The AirPlay entry is listed as an output whenever the picker API exists.
+        // The AirPlay entry is a per-app route: the mixer never marks it as a
+        // possible system output, so the shortcut skips it like any output
+        // that cannot be the default.
         let airPlayUID = AirPlayRouteManager.airPlaySentinelUID
-        let available: Set<String> = ["BuiltInSpeakerDevice", "ExternalDisplay", airPlayUID]
-
-        let toAirPlay = MixerRoutingSupport.nextSelectedOutputDeviceUID(
-            currentUID: "BuiltInSpeakerDevice",
-            selectedUIDs: ["BuiltInSpeakerDevice", airPlayUID],
-            availableUIDs: available
-        )
-        suite.expect(toAirPlay == airPlayUID,
-                     "switching from built-in speakers advances to the AirPlay entry")
-
-        let fromAirPlay = MixerRoutingSupport.nextSelectedOutputDeviceUID(
-            currentUID: airPlayUID,
-            selectedUIDs: ["BuiltInSpeakerDevice", airPlayUID],
-            availableUIDs: available
-        )
-        suite.expect(fromAirPlay == "BuiltInSpeakerDevice",
-                     "switching from the AirPlay entry advances back to built-in speakers")
-
-        let withoutPicker = MixerRoutingSupport.nextSelectedOutputDeviceUID(
-            currentUID: "BuiltInSpeakerDevice",
-            selectedUIDs: ["BuiltInSpeakerDevice", airPlayUID],
-            availableUIDs: ["BuiltInSpeakerDevice", "ExternalDisplay"]
-        )
-        suite.expect(withoutPicker == nil,
-                     "an AirPlay entry that is not listed is skipped like any missing output")
+        mixer.outputDevices = [Device(uid: "BuiltInSpeakerDevice", canBeDefaultOutput: true),
+                               Device(uid: airPlayUID, canBeDefaultOutput: false),
+                               Device(uid: "ExternalDisplay", canBeDefaultOutput: true)]
+        mixer.currentOutputDeviceUID = "BuiltInSpeakerDevice"
+        mixer.switchedTo = []
+        suite.expect(mixer.switchToNextSoundOutput(in: ["BuiltInSpeakerDevice", airPlayUID, "ExternalDisplay"])
+                     && mixer.switchedTo == ["ExternalDisplay"],
+                     "the output shortcut skips the per-app AirPlay entry")
     }
 }
