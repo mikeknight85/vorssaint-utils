@@ -31,12 +31,14 @@ struct AirPlayRoutePickerRepresentable: NSViewRepresentable {
 /// A compact AirPlay button suitable for the mixer panel header and output switcher.
 struct AirPlayPickerButton: View {
     @ObservedObject private var manager = AirPlayRouteManager.shared
+    @ObservedObject private var l10n = L10n.shared
 
     var body: some View {
         if manager.isAvailable {
             AirPlayRoutePickerRepresentable()
                 .frame(width: 24, height: 22)
-                .help(manager.activeSpeakerName.map { "AirPlay: \($0)" } ?? "Choose AirPlay speaker…")
+                .help(manager.activeSpeakerName.map { String(format: l10n.s.mixerAirPlaySpeakerFormat, $0) }
+                      ?? l10n.s.mixerAirPlayPickerTooltip)
         }
     }
 }

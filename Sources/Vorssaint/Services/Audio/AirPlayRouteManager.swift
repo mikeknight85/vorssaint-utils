@@ -145,7 +145,8 @@ final class AirPlayRouteManager: NSObject, ObservableObject {
     }
 
     private var fallbackWindow: NSWindow?
-    private var fallbackPopoverObserver: NSObjectProtocol?
+    /// The picker hosted in `fallbackWindow`; its delegate callback closes the window.
+    private weak var fallbackPicker: AVRoutePickerView?
 
     /// Programmatically opens the system route picker anchored to the active picker view,
     /// or anchors an invisible transient popup at the mouse cursor if no UI picker is currently mounted.
@@ -155,10 +156,6 @@ final class AirPlayRouteManager: NSObject, ObservableObject {
             return
         }
 
-        if let obs = fallbackPopoverObserver {
-            NotificationCenter.default.removeObserver(obs)
-            fallbackPopoverObserver = nil
-        }
         fallbackWindow?.orderOut(nil)
         fallbackWindow = nil
 
@@ -181,29 +178,7 @@ final class AirPlayRouteManager: NSObject, ObservableObject {
             win.contentView?.addSubview(picker)
             win.orderFront(nil)
             self.fallbackWindow = win
-
-            self.fallbackPopoverObserver = NotificationCenter.default.addObserver(
-                forName: NSPopover.didCloseNotification,
-                object: nil,
-                queue: .main
-            ) { [weak self, weak win] notif in
-                guard let pop = notif.object as? NSPopover,
-                      let vc = pop.contentViewController,
-                      String(describing: type(of: vc)).contains("RoutePicker") else {
-                    return
-                }
-                // Dismiss asynchronously so AppKit can finish its popover teardown
-                DispatchQueue.main.async {
-                    win?.orderOut(nil)
-                    if self?.fallbackWindow === win {
-                        self?.fallbackWindow = nil
-                    }
-                    if let obs = self?.fallbackPopoverObserver {
-                        NotificationCenter.default.removeObserver(obs)
-                        self?.fallbackPopoverObserver = nil
-                    }
-                }
-            }
+            self.fallbackPicker = picker as? AVRoutePickerView
 
             // Watchdog to ensure temporary window is cleaned up eventually
             DispatchQueue.main.asyncAfter(deadline: .now() + 180) { [weak self, weak win] in
@@ -652,6 +627,15 @@ extension AirPlayRouteManager: AVRoutePickerViewDelegate {
     }
 
     func routePickerViewDidEndPresentingRoutes(_ routePickerView: AVRoutePickerView) {
+        if routePickerView === fallbackPicker {
+            // Asynchronously, so AppKit finishes tearing the picker down first.
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.fallbackPicker === routePickerView else { return }
+                self.fallbackWindow?.orderOut(nil)
+                self.fallbackWindow = nil
+                self.fallbackPicker = nil
+            }
+        }
         refreshActiveDevice()
         // Keep flag briefly active so any click that dismissed the picker does not simultaneously drop the panel
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
