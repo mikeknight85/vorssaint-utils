@@ -977,12 +977,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
             guard self.statusController.containsStatusItem(at: mouseLoc) == false else { return }
             // Ignore events delivered to remote views or child popovers (like the system
             // AirPlay route picker) which appear in global monitors because they are rendered out-of-process.
-            if NSApplication.shared.windows.contains(where: { $0.isVisible && $0.frame.contains(mouseLoc) }) {
+            let ownWindows = NSApplication.shared.windows.map {
+                PopoverDismissSupport.Window(frame: $0.frame,
+                                             isVisible: $0.isVisible,
+                                             ignoresMouseEvents: $0.ignoresMouseEvents)
+            }
+            if PopoverDismissSupport.clickIsInsideOwnWindow(mouseLoc, windows: ownWindows) {
                 return
             }
             self.closePopover()
         }
- 
+
         // Local events cover our own Settings window. Keep Settings + panel open
         // when they sit side by side for live reordering, but close the panel if it
         // overlaps Settings and the user clicks Settings to get it out of the way.
