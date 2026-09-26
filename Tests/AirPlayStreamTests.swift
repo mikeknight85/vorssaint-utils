@@ -58,3 +58,45 @@ enum AirPlayRingBufferContract {
                      "streaming continues without loss once frame positions pass the 32-bit range")
     }
 }
+
+/// Only Vorssaint's own AirPlay entry streams through the route picker. Every
+/// other output, including AirPlay devices macOS exposes, follows the normal
+/// device rules: listed means usable, missing means fall back to the default.
+enum AirPlayRouteContract {
+    static func run(_ suite: TestSuite) {
+        let sentinel = AirPlayRouteManager.airPlaySentinelUID
+        // Real AirPlay outputs carry a session UID; third-party virtual drivers
+        // may well mention AirPlay in theirs.
+        let macOSAirPlay = "50ea6ba0-8555-4fce-b618-b4cb1729da75-326608458962375-Audio"
+        let namedLikeAirPlay = "com.example.AirPlayReceiver.output"
+
+        suite.expect(MixerRoutingSupport.isAirPlaySentinel(sentinel)
+                     && !MixerRoutingSupport.isAirPlaySentinel(macOSAirPlay)
+                     && !MixerRoutingSupport.isAirPlaySentinel(namedLikeAirPlay)
+                     && !MixerRoutingSupport.isAirPlaySentinel("AirPlay"),
+                     "only the exact AirPlay entry counts as the picker route")
+
+        let listed: Set<String> = ["BuiltInSpeakerDevice", sentinel]
+        suite.expect(MixerRoutingSupport.effectiveDeviceUID(selectedUID: sentinel,
+                                                            availableUIDs: listed,
+                                                            defaultUID: "BuiltInSpeakerDevice") == sentinel
+                     && !MixerRoutingSupport.selectedDeviceUnavailable(selectedUID: sentinel,
+                                                                       availableUIDs: listed),
+                     "a listed AirPlay entry is used as the app's route")
+
+        let unlisted: Set<String> = ["BuiltInSpeakerDevice"]
+        suite.expect(MixerRoutingSupport.effectiveDeviceUID(selectedUID: sentinel,
+                                                            availableUIDs: unlisted,
+                                                            defaultUID: "BuiltInSpeakerDevice") == "BuiltInSpeakerDevice"
+                     && MixerRoutingSupport.selectedDeviceUnavailable(selectedUID: sentinel,
+                                                                      availableUIDs: unlisted),
+                     "without the picker API the AirPlay route falls back and shows as unavailable")
+
+        suite.expect(MixerRoutingSupport.effectiveDeviceUID(selectedUID: namedLikeAirPlay,
+                                                            availableUIDs: unlisted,
+                                                            defaultUID: "BuiltInSpeakerDevice") == "BuiltInSpeakerDevice"
+                     && MixerRoutingSupport.selectedDeviceUnavailable(selectedUID: namedLikeAirPlay,
+                                                                      availableUIDs: unlisted),
+                     "a missing output that mentions AirPlay falls back like any other device")
+    }
+}

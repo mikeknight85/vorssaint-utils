@@ -23,8 +23,9 @@ enum SoundOutputSwitchContract {
                      && mixer.switchedTo == ["ExternalDisplay"],
                      "two selected outputs still switch to the next one")
 
+        // The AirPlay entry is listed as an output whenever the picker API exists.
         let airPlayUID = AirPlayRouteManager.airPlaySentinelUID
-        let available: Set<String> = ["BuiltInSpeakerDevice", "ExternalDisplay"]
+        let available: Set<String> = ["BuiltInSpeakerDevice", "ExternalDisplay", airPlayUID]
 
         let toAirPlay = MixerRoutingSupport.nextSelectedOutputDeviceUID(
             currentUID: "BuiltInSpeakerDevice",
@@ -32,19 +33,22 @@ enum SoundOutputSwitchContract {
             availableUIDs: available
         )
         suite.expect(toAirPlay == airPlayUID,
-                     "switching from built-in speakers advances to offline AirPlay route")
+                     "switching from built-in speakers advances to the AirPlay entry")
 
         let fromAirPlay = MixerRoutingSupport.nextSelectedOutputDeviceUID(
-            currentUID: "AirPlay",
+            currentUID: airPlayUID,
             selectedUIDs: ["BuiltInSpeakerDevice", airPlayUID],
             availableUIDs: available
         )
         suite.expect(fromAirPlay == "BuiltInSpeakerDevice",
-                     "switching from active AirPlay advances back to built-in speakers")
+                     "switching from the AirPlay entry advances back to built-in speakers")
 
-        suite.expect(MixerRoutingSupport.isAirPlayUID(airPlayUID) &&
-                     MixerRoutingSupport.isAirPlayUID("AirPlay") &&
-                     !MixerRoutingSupport.isAirPlayUID("BuiltInSpeakerDevice"),
-                     "AirPlay UID predicate distinguishes sentinel and active AirPlay from hardware")
+        let withoutPicker = MixerRoutingSupport.nextSelectedOutputDeviceUID(
+            currentUID: "BuiltInSpeakerDevice",
+            selectedUIDs: ["BuiltInSpeakerDevice", airPlayUID],
+            availableUIDs: ["BuiltInSpeakerDevice", "ExternalDisplay"]
+        )
+        suite.expect(withoutPicker == nil,
+                     "an AirPlay entry that is not listed is skipped like any missing output")
     }
 }

@@ -568,7 +568,7 @@ final class AppVolumeMixer: ObservableObject {
         engineRecovery.clear(app.id)
         let sanitized = Defaults.sanitizedAppOutputDeviceUID(uid)
         persistOutputDeviceUID(sanitized, for: app)
-        if let sanitized, MixerRoutingSupport.isAirPlayUID(sanitized), !AirPlayRouteManager.shared.isConnected {
+        if let sanitized, MixerRoutingSupport.isAirPlaySentinel(sanitized), !AirPlayRouteManager.shared.isConnected {
             AirPlayRouteManager.shared.presentPicker()
         }
         if let index = apps.firstIndex(where: { $0.id == app.id }) {
@@ -793,7 +793,7 @@ final class AppVolumeMixer: ObservableObject {
         guard engineRecovery.allowsBuild(app.id, configuration: configuration) else { return }
         guard #available(macOS 14.4, *), let token = builds.begin(app.id) else { return }
 
-        if MixerRoutingSupport.isAirPlayUID(targetOutputDeviceUID) {
+        if MixerRoutingSupport.isAirPlaySentinel(targetOutputDeviceUID) {
             let clockUID = clockDeviceUIDForAirPlayTap()
             buildQueue.async { [weak self] in
                 let engine = AirPlayGainEngine(appID: app.id,
@@ -826,10 +826,10 @@ final class AppVolumeMixer: ObservableObject {
     }
 
     private func clockDeviceUIDForAirPlayTap() -> String {
-        if let current = currentOutputDeviceUID, !MixerRoutingSupport.isAirPlayUID(current) {
+        if let current = currentOutputDeviceUID, !MixerRoutingSupport.isAirPlaySentinel(current) {
             return current
         }
-        if let hardware = outputDevices.first(where: { !MixerRoutingSupport.isAirPlayUID($0.uid) })?.uid {
+        if let hardware = outputDevices.first(where: { !MixerRoutingSupport.isAirPlaySentinel($0.uid) })?.uid {
             return hardware
         }
         return "BuiltInSpeakerDevice"
@@ -1753,15 +1753,9 @@ final class AppVolumeMixer: ObservableObject {
             var transportType: UInt32 = 0
             _ = read(deviceID, kAudioDevicePropertyTransportType, &transportType)
 
-            var displayName = name
-            if (transportType == kAudioDeviceTransportTypeAirPlay || MixerRoutingSupport.isAirPlayUID(uid)),
-               let speakerName = AirPlayRouteManager.shared.currentSpeakerName, !speakerName.isEmpty {
-                displayName = "\(speakerName) (AirPlay)"
-            }
-
             devices.append(MixerOutputDevice(id: uid,
                                              uid: uid,
-                                             name: displayName,
+                                             name: name,
                                              isDefault: uid == defaultUID,
                                              isHeadphones: MixerRoutingSupport.outputLooksLikeHeadphones(
                                                 name: name,
@@ -1774,7 +1768,9 @@ final class AppVolumeMixer: ObservableObject {
                                              audioObjectID: deviceID))
         }
 
-        if AirPlayRouteManager.shared.isAvailable && !devices.contains(where: { MixerRoutingSupport.isAirPlayUID($0.uid) }) {
+        // Always listed while the picker API exists, next to any AirPlay device
+        // macOS itself exposes: the two are different routes.
+        if AirPlayRouteManager.shared.isAvailable {
             let airPlayName: String
             if let active = AirPlayRouteManager.shared.currentSpeakerName, !active.isEmpty {
                 airPlayName = "\(active) (AirPlay)"

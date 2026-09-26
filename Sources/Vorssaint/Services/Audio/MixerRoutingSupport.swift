@@ -227,7 +227,7 @@ enum MixerRoutingSupport {
     static func effectiveDeviceUID(selectedUID: String?,
                                    availableUIDs: Set<String>,
                                    defaultUID: String?) -> String? {
-        if let selectedUID, availableUIDs.contains(selectedUID) || isAirPlayUID(selectedUID) {
+        if let selectedUID, availableUIDs.contains(selectedUID) {
             return selectedUID
         }
         return defaultUID
@@ -236,7 +236,6 @@ enum MixerRoutingSupport {
     static func selectedDeviceUnavailable(selectedUID: String?,
                                           availableUIDs: Set<String>) -> Bool {
         guard let selectedUID else { return false }
-        if isAirPlayUID(selectedUID) { return false }
         return !availableUIDs.contains(selectedUID)
     }
 
@@ -247,15 +246,12 @@ enum MixerRoutingSupport {
                                volumes: volumes)
     }
 
-    static func isAirPlayUID(_ uid: String) -> Bool {
-        uid == AirPlayRouteManager.airPlaySentinelUID || uid.lowercased().contains("airplay")
-    }
-
-    static func matchingDeviceUID(currentUID: String?, candidateUID: String) -> Bool {
-        guard let currentUID else { return false }
-        if currentUID == candidateUID { return true }
-        if isAirPlayUID(currentUID) && isAirPlayUID(candidateUID) { return true }
-        return false
+    /// Vorssaint's own AirPlay entry, streamed through the system route picker.
+    /// Exact match only: real AirPlay devices macOS exposes are ordinary outputs
+    /// and route through the normal tap, and a device name or UID that merely
+    /// mentions AirPlay must never be mistaken for this entry.
+    static func isAirPlaySentinel(_ uid: String) -> Bool {
+        uid == AirPlayRouteManager.airPlaySentinelUID
     }
 
     static func nextSelectedOutputDeviceUID(currentUID: String?,
@@ -264,13 +260,13 @@ enum MixerRoutingSupport {
         var seen = Set<String>()
         let candidates = selectedUIDs.compactMap { rawUID -> String? in
             guard let uid = sanitizedDeviceUID(rawUID),
-                  availableUIDs.contains(uid) || isAirPlayUID(uid),
+                  availableUIDs.contains(uid),
                   seen.insert(uid).inserted else { return nil }
             return uid
         }
         guard !candidates.isEmpty else { return nil }
         guard let currentUID,
-              let index = candidates.firstIndex(where: { matchingDeviceUID(currentUID: currentUID, candidateUID: $0) }) else {
+              let index = candidates.firstIndex(of: currentUID) else {
             return candidates[0]
         }
         guard candidates.count > 1 else { return nil }
