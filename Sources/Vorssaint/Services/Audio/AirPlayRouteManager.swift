@@ -476,6 +476,11 @@ final class MixingAudioSource: @unchecked Sendable {
     private var resamplers: [String: LinearResampler] = [:]
     private var mixBus = [Float](repeating: 0, count: 4096 * 2)
     private var laneBus = [Float](repeating: 0, count: 4096 * 2)
+    /// A boosted app, or several loud ones together, can sum past full scale.
+    /// The same limiter the device path uses turns the mix down for just those
+    /// peaks instead of clipping them into crackle (issue #326).
+    private let limiter = BoostLookaheadLimiter(channels: 2)
+    private let limiterRelease = BoostLimiter.release(sampleRate: 44_100)
 
     func setBuffer(_ buffer: AudioRingBuffer, forKey key: String) {
         lock.lock()
@@ -517,6 +522,7 @@ final class MixingAudioSource: @unchecked Sendable {
                     for index in 0..<samples { mixBase[index] += laneBase[index] }
                 }
             }
+            limiter.process(mixBase, frames: frameCount, channels: 2, release: limiterRelease)
 
             for index in 0..<samples {
                 let scaled = mixBase[index] * 32_767

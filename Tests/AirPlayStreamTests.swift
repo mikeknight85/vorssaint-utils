@@ -133,3 +133,34 @@ enum AirPlayRouteContract {
                      "other routes are untouched by the AirPlay connection")
     }
 }
+
+/// Boosted apps, or several loud apps together, must not be hard-clipped on
+/// their way to the speaker (the AirPlay twin of issue #326).
+enum AirPlayMixLimiterContract {
+    static func run(_ suite: TestSuite) {
+        let mixer = MixingAudioSource()
+        let frames = 4096
+        let loud = [Float](repeating: 0.9, count: frames * 2)
+        for key in ["a", "b"] {
+            let ring = AudioRingBuffer(sampleRate: 44_100, capacityFrames: frames)
+            loud.withUnsafeBufferPointer { ring.write(frames: $0.baseAddress!, frameCount: frames, gain: 1) }
+            mixer.setBuffer(ring, forKey: key)
+        }
+
+        var output = [Int16](repeating: 0, count: frames * 2)
+        output.withUnsafeMutableBufferPointer { mixer.readFrames(into: $0.baseAddress!, frameCount: frames) }
+        let ceiling = Int16(BoostLimiter.ceiling * 32_767)
+        let settled = output[(frames - 64) * 2..<frames * 2]
+        suite.expect(settled.allSatisfy { abs(Int($0) - Int(ceiling)) <= 2 },
+                     "a mix past full scale is limited to the ceiling instead of clipped")
+
+        let quiet = MixingAudioSource()
+        let ring = AudioRingBuffer(sampleRate: 44_100, capacityFrames: frames)
+        [Float](repeating: 0.25, count: frames * 2)
+            .withUnsafeBufferPointer { ring.write(frames: $0.baseAddress!, frameCount: frames, gain: 1) }
+        quiet.setBuffer(ring, forKey: "a")
+        output.withUnsafeMutableBufferPointer { quiet.readFrames(into: $0.baseAddress!, frameCount: frames) }
+        suite.expect(output[(frames - 1) * 2] == Int16(0.25 * 32_767),
+                     "a mix inside full scale passes through at its level")
+    }
+}
