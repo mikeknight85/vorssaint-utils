@@ -30,12 +30,20 @@ final class AirPlayRouteManager: NSObject, ObservableObject {
     private static let snapshotLock = NSLock()
     private static var snapshotIsListed = false
     private static var snapshotSpeakerName: String?
+    private static var snapshotIsConnected = false
 
     /// True while the mixer is running and AirPlay can actually be streamed to.
     static var isListed: Bool {
         snapshotLock.lock()
         defer { snapshotLock.unlock() }
         return snapshotIsListed
+    }
+
+    /// True while a speaker is picked, so the AirPlay entry can carry audio.
+    static var isSpeakerConnected: Bool {
+        snapshotLock.lock()
+        defer { snapshotLock.unlock() }
+        return snapshotIsConnected
     }
 
     /// The speaker chosen in the picker, if any.
@@ -99,6 +107,7 @@ final class AirPlayRouteManager: NSObject, ObservableObject {
         onChange = nil
         Self.snapshotLock.lock()
         Self.snapshotIsListed = false
+        Self.snapshotIsConnected = false
         Self.snapshotLock.unlock()
     }
 
@@ -259,6 +268,7 @@ final class AirPlayRouteManager: NSObject, ObservableObject {
         cachedSpeakerName = name
         Self.snapshotLock.lock()
         Self.snapshotSpeakerName = name
+        Self.snapshotIsConnected = connected
         Self.snapshotLock.unlock()
 
         if connectedChanged {
@@ -288,11 +298,14 @@ final class AirPlayRouteManager: NSObject, ObservableObject {
     private let mixerSource = MixingAudioSource()
     private let streamLock = NSLock()
 
-    func addAudioStream(key: String, buffer: AudioRingBuffer) {
+    /// Adds an app's stream; false when no renderer could be started for it.
+    func addAudioStream(key: String, buffer: AudioRingBuffer) -> Bool {
         streamLock.lock()
-        mixerSource.setBuffer(buffer, forKey: key)
+        defer { streamLock.unlock() }
         startRendererIfNeeded()
-        streamLock.unlock()
+        guard airPlayRenderer != nil else { return false }
+        mixerSource.setBuffer(buffer, forKey: key)
+        return true
     }
 
     func removeAudioStream(key: String) {
@@ -544,8 +557,10 @@ final class AirPlayRenderer: @unchecked Sendable {
         ) == noErr, let format else { return nil }
         self.formatDescription = format
 
+        // Unbound, the renderer would play on the local default output while
+        // the app is muted by its tap and the UI claims AirPlay.
+        guard manager.bindOutputContext(to: renderer) else { return nil }
         synchronizer.addRenderer(renderer)
-        _ = manager.bindOutputContext(to: renderer)
     }
 
     private var feedTimer: DispatchSourceTimer?

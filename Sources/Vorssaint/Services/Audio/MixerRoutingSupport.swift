@@ -254,6 +254,14 @@ enum MixerRoutingSupport {
         uid == AirPlayRouteManager.airPlaySentinelUID
     }
 
+    /// Outputs an app's audio can go to right now. The AirPlay entry stays in
+    /// the list (choosing it opens the picker) but only carries audio while a
+    /// speaker is picked; otherwise the app falls back to the default output,
+    /// exactly like unplugged headphones.
+    static func routableOutputUIDs(_ uids: [String], airPlayConnected: Bool) -> Set<String> {
+        Set(uids.filter { airPlayConnected || !isAirPlaySentinel($0) })
+    }
+
     static func nextSelectedOutputDeviceUID(currentUID: String?,
                                             selectedUIDs: [String],
                                             availableUIDs: Set<String>) -> String? {

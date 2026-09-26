@@ -581,7 +581,9 @@ final class AppVolumeMixer: ObservableObject {
             apps[index].selectedOutputDeviceUID = sanitized
             applyOutputRoute(to: &apps[index],
                              savedOutputs: [app.id: sanitized].compactMapValues { $0 },
-                             availableUIDs: Set(outputDevices.map(\.uid)),
+                             availableUIDs: MixerRoutingSupport.routableOutputUIDs(
+                                outputDevices.map(\.uid),
+                                airPlayConnected: AirPlayRouteManager.isSpeakerConnected),
                              defaultUID: currentOutputDeviceUID)
             // The running tap is left alone here: applyRouting builds the one
             // for the new device first and only then stops this one, so the
@@ -685,7 +687,9 @@ final class AppVolumeMixer: ObservableObject {
         // replacement running on the new device.
         builds.invalidateAll()
 
-        let availableUIDs = Set(outputDevices.map(\.uid))
+        let availableUIDs = MixerRoutingSupport.routableOutputUIDs(
+            outputDevices.map(\.uid),
+            airPlayConnected: AirPlayRouteManager.isSpeakerConnected)
         apps = apps.map { current in
             var app = current
             app.volume = storedVolume(for: app.identity, saved: preferences.volumes) ?? app.volume
@@ -1091,7 +1095,9 @@ final class AppVolumeMixer: ObservableObject {
             selector: kAudioHardwarePropertyDefaultSystemOutputDevice)
         let nextOutputDevices = outputDevices(defaultUID: defaultUID)
         let defaultDevice = nextOutputDevices.first { $0.uid == defaultUID }
-        let availableUIDs = Set(nextOutputDevices.map(\.uid))
+        let availableUIDs = MixerRoutingSupport.routableOutputUIDs(
+            nextOutputDevices.map(\.uid),
+            airPlayConnected: AirPlayRouteManager.isSpeakerConnected)
         let lowered = loweringOutputVolumeIfHeadphonesDisconnected(
             state: request.lowered,
             previousDefaultUID: request.previousDefaultUID,
@@ -2419,12 +2425,11 @@ private final class AirPlayGainEngine: GainEngine {
             return nil
         }
 
-        guard AudioDeviceStart(aggregateID, ioProc) == noErr else {
+        guard AudioDeviceStart(aggregateID, ioProc) == noErr,
+              AirPlayRouteManager.shared.addAudioStream(key: appID, buffer: ringBuffer) else {
             stop()
             return nil
         }
-
-        AirPlayRouteManager.shared.addAudioStream(key: appID, buffer: ringBuffer)
     }
 
     func stop() {

@@ -98,5 +98,38 @@ enum AirPlayRouteContract {
                      && MixerRoutingSupport.selectedDeviceUnavailable(selectedUID: namedLikeAirPlay,
                                                                       availableUIDs: unlisted),
                      "a missing output that mentions AirPlay falls back like any other device")
+
+        connection(suite, sentinel: sentinel)
+    }
+
+    /// Losing the speaker must hand the app back to the default output, not
+    /// keep it tapped and silent; picking one again restores the AirPlay route.
+    private static func connection(_ suite: TestSuite, sentinel: String) {
+        let listedOutputs = ["BuiltInSpeakerDevice", "ArctisNovaPro", sentinel]
+
+        let disconnected = MixerRoutingSupport.routableOutputUIDs(listedOutputs, airPlayConnected: false)
+        suite.expect(disconnected == ["BuiltInSpeakerDevice", "ArctisNovaPro"],
+                     "without a picked speaker the AirPlay entry carries no audio")
+        suite.expect(MixerRoutingSupport.effectiveDeviceUID(selectedUID: sentinel,
+                                                            availableUIDs: disconnected,
+                                                            defaultUID: "ArctisNovaPro") == "ArctisNovaPro"
+                     && MixerRoutingSupport.selectedDeviceUnavailable(selectedUID: sentinel,
+                                                                      availableUIDs: disconnected),
+                     "an app routed to AirPlay plays on the default output while no speaker is picked")
+        suite.expect(!MixerRoutingSupport.requiresEngine(volume: 1,
+                                                         selectedOutputDeviceUID: sentinel,
+                                                         targetOutputDeviceUID: "ArctisNovaPro",
+                                                         defaultOutputDeviceUID: "ArctisNovaPro"),
+                     "at 100% that fallback is untapped passthrough, not a muting tap")
+
+        let connected = MixerRoutingSupport.routableOutputUIDs(listedOutputs, airPlayConnected: true)
+        suite.expect(MixerRoutingSupport.effectiveDeviceUID(selectedUID: sentinel,
+                                                            availableUIDs: connected,
+                                                            defaultUID: "ArctisNovaPro") == sentinel,
+                     "picking a speaker again restores the AirPlay route")
+        suite.expect(MixerRoutingSupport.effectiveDeviceUID(selectedUID: "BuiltInSpeakerDevice",
+                                                            availableUIDs: disconnected,
+                                                            defaultUID: "ArctisNovaPro") == "BuiltInSpeakerDevice",
+                     "other routes are untouched by the AirPlay connection")
     }
 }
