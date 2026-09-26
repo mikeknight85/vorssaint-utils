@@ -197,6 +197,11 @@ final class AppVolumeMixer: ObservableObject {
         processMonitoringEnabled = AppFeature.mixer.isAvailable
         if processMonitoringEnabled {
             publishHiddenApps()
+            // Created here, on the main thread, before any refresh reads the
+            // AirPlay snapshot from the HAL queue.
+            AirPlayRouteManager.shared.activate { [weak self] in
+                self?.refreshApps()
+            }
         }
         guard !listenerInstalled else {
             refreshApps()
@@ -259,6 +264,7 @@ final class AppVolumeMixer: ObservableObject {
             NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
             self.wakeObserver = nil
         }
+        AirPlayRouteManager.shared.deactivate()
         if !apps.isEmpty { apps = [] }
         if !hiddenApps.isEmpty { hiddenApps = [] }
         if !outputDevices.isEmpty { outputDevices = [] }
@@ -1770,9 +1776,9 @@ final class AppVolumeMixer: ObservableObject {
 
         // Always listed while the picker API exists, next to any AirPlay device
         // macOS itself exposes: the two are different routes.
-        if AirPlayRouteManager.shared.isAvailable {
+        if AirPlayRouteManager.isListed {
             let airPlayName: String
-            if let active = AirPlayRouteManager.shared.currentSpeakerName, !active.isEmpty {
+            if let active = AirPlayRouteManager.currentSpeakerName, !active.isEmpty {
                 airPlayName = "\(active) (AirPlay)"
             } else {
                 airPlayName = "AirPlay"

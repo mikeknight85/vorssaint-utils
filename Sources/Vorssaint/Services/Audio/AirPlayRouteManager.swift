@@ -25,20 +25,34 @@ final class AirPlayRouteManager: NSObject, ObservableObject {
     @Published private(set) var activeSpeakerName: String?
     @Published private(set) var isPresentingPicker: Bool = false
 
-    private let stateLock = NSLock()
-    private var cachedSpeakerName: String?
-    private var cachedIsConnected: Bool = false
+    /// What the mixer's device refresh needs, readable from its HAL queue
+    /// without creating the manager (which must happen on the main thread).
+    private static let snapshotLock = NSLock()
+    private static var snapshotIsListed = false
+    private static var snapshotSpeakerName: String?
 
-    /// Thread-safe accessor for the active AirPlay speaker name.
-    var currentSpeakerName: String? {
-        stateLock.lock()
-        defer { stateLock.unlock() }
-        return cachedSpeakerName
+    /// True while the mixer is running and AirPlay can actually be streamed to.
+    static var isListed: Bool {
+        snapshotLock.lock()
+        defer { snapshotLock.unlock() }
+        return snapshotIsListed
     }
+
+    /// The speaker chosen in the picker, if any.
+    static var currentSpeakerName: String? {
+        snapshotLock.lock()
+        defer { snapshotLock.unlock() }
+        return snapshotSpeakerName
+    }
+
+    private var cachedIsConnected: Bool = false
+    private var cachedSpeakerName: String?
 
     private var routingContext: NSObject?
     private weak var activePickerView: NSView?
     private var pollTimer: Timer?
+    /// Called on the main thread when the connection or speaker changes.
+    private var onChange: (() -> Void)?
 
     private typealias MsgSendClass = @convention(c) (AnyClass, Selector) -> AnyObject?
     private typealias MsgSendObj = @convention(c) (AnyObject, Selector, AnyObject?) -> Void
@@ -47,16 +61,45 @@ final class AirPlayRouteManager: NSObject, ObservableObject {
     private let msgSendSym = dlsym(dlopen(nil, RTLD_NOW), "objc_msgSend")
 
     private override init() {
+        assert(Thread.isMainThread, "AirPlayRouteManager must be created on the main thread")
         super.init()
         dlopen("/System/Library/Frameworks/AVKit.framework/AVKit", RTLD_NOW)
         dlopen("/System/Library/Frameworks/AVFoundation.framework/AVFoundation", RTLD_NOW)
-        self.isAvailable = NSClassFromString("AVOutputContext") != nil
         setupContext()
-        startPolling()
+        // Streaming needs both the shared context and a renderer that can be
+        // bound to it; without either, AirPlay is never offered.
+        self.isAvailable = routingContext != nil
+            && AVSampleBufferAudioRenderer.instancesRespond(to: sel_registerName("setOutputContext:"))
     }
 
     deinit {
         pollTimer?.invalidate()
+    }
+
+    /// Starts tracking the picked speaker while the mixer runs. Main thread.
+    func activate(onChange: @escaping () -> Void) {
+        assert(Thread.isMainThread)
+        self.onChange = onChange
+        Self.snapshotLock.lock()
+        Self.snapshotIsListed = isAvailable
+        Self.snapshotLock.unlock()
+        refreshActiveDevice()
+        guard isAvailable, pollTimer == nil else { return }
+        // Poll the speaker name every 1.5 seconds on the main run loop.
+        pollTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
+            self?.refreshActiveDevice()
+        }
+    }
+
+    /// Stops tracking; the mixer no longer lists AirPlay. Main thread.
+    func deactivate() {
+        assert(Thread.isMainThread)
+        pollTimer?.invalidate()
+        pollTimer = nil
+        onChange = nil
+        Self.snapshotLock.lock()
+        Self.snapshotIsListed = false
+        Self.snapshotLock.unlock()
     }
 
     private func setupContext() {
@@ -67,7 +110,6 @@ final class AirPlayRouteManager: NSObject, ObservableObject {
 
         if let ctx = (msgClass(cls, sharedSys) ?? msgClass(cls, defaultShared)) as? NSObject {
             self.routingContext = ctx
-            refreshActiveDevice()
         }
     }
 
@@ -178,6 +220,7 @@ final class AirPlayRouteManager: NSObject, ObservableObject {
 
     /// Refreshes the currently connected AirPlay device name and status.
     func refreshActiveDevice() {
+        assert(Thread.isMainThread)
         guard let context = routingContext, let sym = msgSendSym else { return }
         let msgObjReturn = unsafeBitCast(sym, to: MsgSendObjReturn.self)
 
@@ -210,12 +253,13 @@ final class AirPlayRouteManager: NSObject, ObservableObject {
         let hasDevice = context.responds(to: outputDevSel) && msgObjReturn(context, outputDevSel) != nil
         let connected = hasDevice && name != nil
 
-        stateLock.lock()
         let connectedChanged = cachedIsConnected != connected
         let nameChanged = cachedSpeakerName != name
         cachedIsConnected = connected
         cachedSpeakerName = name
-        stateLock.unlock()
+        Self.snapshotLock.lock()
+        Self.snapshotSpeakerName = name
+        Self.snapshotLock.unlock()
 
         if connectedChanged {
             self.isConnected = connected
@@ -223,12 +267,8 @@ final class AirPlayRouteManager: NSObject, ObservableObject {
         if nameChanged {
             self.activeSpeakerName = name
         }
-    }
-
-    private func startPolling() {
-        // Poll device name every 1.5 seconds on the main queue
-        pollTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
-            self?.refreshActiveDevice()
+        if connectedChanged || nameChanged {
+            onChange?()
         }
     }
 
