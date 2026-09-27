@@ -323,7 +323,25 @@ final class AirPlayRouteManager: NSObject, ObservableObject {
     private var mirrorArtwork: MPMediaItemArtwork?
     private let mirrorQueue = DispatchQueue(label: "com.vorssaint.airplay.now-playing-mirror", qos: .utility)
 
+    private var experimentOptedOutOfNowPlaying = false
+
+    /// EXPERIMENT E4: publish for the AirPlay route without becoming the Mac's
+    /// global Now Playing app, so media keys and MediaRemote keep reaching the source app.
+    private func experimentOptOutOfGlobalNowPlaying() {
+        guard !experimentOptedOutOfNowPlaying else { return }
+        experimentOptedOutOfNowPlaying = true
+        typealias SetCanBe = @convention(c) (Bool) -> Void
+        let handle = dlopen("/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote", RTLD_LAZY)
+        guard let symbol = dlsym(handle, "MRMediaRemoteSetCanBeNowPlayingApplication") else {
+            experimentLog("E4: MRMediaRemoteSetCanBeNowPlayingApplication missing")
+            return
+        }
+        unsafeBitCast(symbol, to: SetCanBe.self)(false)
+        experimentLog("E4: opted out of being the global Now Playing app")
+    }
+
     private func experimentStartMirror(pid: pid_t) {
+        experimentOptOutOfGlobalNowPlaying()
         mirrorPID = pid
         installExperimentCommands()
         mirrorTimer?.invalidate()
@@ -343,6 +361,10 @@ final class AirPlayRouteManager: NSObject, ObservableObject {
     }
 
     private func mirrorRead() {
+        streamLock.lock()
+        let renderer = airPlayRenderer
+        streamLock.unlock()
+        renderer?.resumeIfStalled(reason: "mirror tick")
         let pid = mirrorPID
         guard pid > 0,
               let script = Bundle.main.url(forResource: "now-playing", withExtension: "pl"),
@@ -397,28 +419,47 @@ final class AirPlayRouteManager: NSObject, ObservableObject {
         guard !experimentCommandsInstalled else { return }
         experimentCommandsInstalled = true
         let commands = MPRemoteCommandCenter.shared()
-        for command in [commands.playCommand, commands.pauseCommand, commands.togglePlayPauseCommand,
-                        commands.nextTrackCommand, commands.previousTrackCommand] {
+        let mapping: [(MPRemoteCommand, Int32)] = [(commands.playCommand, 0), (commands.pauseCommand, 1),
+                                                   (commands.togglePlayPauseCommand, 2),
+                                                   (commands.nextTrackCommand, 4), (commands.previousTrackCommand, 5)]
+        for (command, identifier) in mapping {
             command.isEnabled = true
-            command.addTarget { [weak self] event in
-                self?.experimentLog("P1: remote command \(event.command) (not forwarded in prototype)")
+            command.addTarget { [weak self] _ in
+                self?.forward(identifier, position: nil)
                 return .success
             }
         }
-    }
-
-    private func experimentLog(_ line: String) {
-        let url = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Logs/Vorssaint-airplay-experiment.log")
-        let stamped = "\(Date()) \(line)\n"
-        if let handle = try? FileHandle(forWritingTo: url) {
-            handle.seekToEndOfFile()
-            handle.write(Data(stamped.utf8))
-            try? handle.close()
-        } else {
-            try? Data(stamped.utf8).write(to: url)
+        commands.changePlaybackPositionCommand.isEnabled = true
+        commands.changePlaybackPositionCommand.addTarget { [weak self] event in
+            guard let event = event as? MPChangePlaybackPositionCommandEvent else { return .commandFailed }
+            self?.forward(24, position: event.positionTime)
+            return .success
         }
     }
+
+    private func forward(_ command: Int32, position: Double?) {
+        let pid = mirrorPID
+        if command == 0 || command == 2 {
+            streamLock.lock()
+            let renderer = airPlayRenderer
+            streamLock.unlock()
+            renderer?.resumeIfStalled(reason: "play command")
+        }
+        guard pid > 0,
+              let script = Bundle.main.url(forResource: "now-playing", withExtension: "pl"),
+              let library = Bundle.main.privateFrameworksURL?.appendingPathComponent("libVorssaintNowPlaying.dylib")
+        else { return }
+        mirrorQueue.async { [weak self] in
+            var arguments = [script.path, library.path, "command", String(pid), String(command)]
+            if let position { arguments.append(String(format: "%.3f", position)) }
+            let result = BoundedProcessRunner.run("/usr/bin/perl", arguments, timeout: 3, maxOutputBytes: 4_096)
+            let reply = String(decoding: result.output, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+            airPlayExperimentLog("P2: forwarded command \(command) position=\(position.map { String($0) } ?? "-") to pid \(pid): \(reply)")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { self?.mirrorRead() }
+        }
+    }
+
+    private func experimentLog(_ line: String) { airPlayExperimentLog(line) }
 
     func removeAudioStream(key: String) {
         streamLock.lock()
@@ -441,6 +482,20 @@ final class AirPlayRouteManager: NSObject, ObservableObject {
         airPlayRenderer?.stop()
         airPlayRenderer = nil
         DispatchQueue.main.async { [weak self] in self?.experimentStopMirror() }
+    }
+}
+
+/// EXPERIMENT: shared log for the AirPlay prototype.
+func airPlayExperimentLog(_ line: String) {
+    let url = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Logs/Vorssaint-airplay-experiment.log")
+    let stamped = "\(Date()) \(line)\n"
+    if let handle = try? FileHandle(forWritingTo: url) {
+        handle.seekToEndOfFile()
+        handle.write(Data(stamped.utf8))
+        try? handle.close()
+    } else {
+        try? Data(stamped.utf8).write(to: url)
     }
 }
 
@@ -681,6 +736,39 @@ final class AirPlayRenderer: @unchecked Sendable {
         // the app is muted by its tap and the UI claims AirPlay.
         guard manager.bindOutputContext(to: renderer) else { return nil }
         synchronizer.addRenderer(renderer)
+        let center = NotificationCenter.default
+        observers = [
+            center.addObserver(forName: AVSampleBufferRenderSynchronizer.rateDidChangeNotification,
+                               object: synchronizer, queue: nil) { [weak self] _ in self?.diagnose("rate changed") },
+            center.addObserver(forName: Notification.Name("AVSampleBufferAudioRendererWasFlushedAutomaticallyNotification"),
+                               object: renderer, queue: nil) { [weak self] note in
+                let time = (note.userInfo?["AVSampleBufferAudioRendererFlushTimeKey"] as? NSValue)?.timeValue.seconds
+                self?.diagnose("flushed automatically at \(time.map { String($0) } ?? "?")")
+            },
+            center.addObserver(forName: Notification.Name("AVSampleBufferAudioRendererOutputConfigurationDidChangeNotification"),
+                               object: renderer, queue: nil) { [weak self] _ in self?.diagnose("output configuration changed") },
+        ]
+    }
+
+    private var observers: [NSObjectProtocol] = []
+
+    deinit {
+        observers.forEach(NotificationCenter.default.removeObserver)
+    }
+
+    private func diagnose(_ event: String) {
+        airPlayExperimentLog("R: \(event) rate=\(synchronizer.rate) time=\(String(format: "%.2f", synchronizer.currentTime().seconds)) next=\(String(format: "%.2f", nextPTS.seconds)) status=\(renderer.status.rawValue) error=\(renderer.error?.localizedDescription ?? "-")")
+    }
+
+    /// EXPERIMENT: restarts the timeline if something else stopped it.
+    func resumeIfStalled(reason: String) {
+        feedQueue.async { [self] in
+            guard started, synchronizer.rate == 0 || renderer.status == .failed else { return }
+            renderer.flush()
+            nextPTS = synchronizer.currentTime()
+            synchronizer.setRate(1.0, time: nextPTS)
+            diagnose("resumed after stall (\(reason))")
+        }
     }
 
     private var feedTimer: DispatchSourceTimer?

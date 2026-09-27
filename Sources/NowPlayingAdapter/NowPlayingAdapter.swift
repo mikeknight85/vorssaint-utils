@@ -230,6 +230,65 @@ public func vorssaintNowPlayingApp() {
     emit(reply)
 }
 
+/// EXPERIMENT: sends one MediaRemote command to the player of the app in
+/// VORSSAINT_NOW_PLAYING_PID, scoped to the item it is playing right now.
+@_cdecl("vorssaint_now_playing_command")
+public func vorssaintNowPlayingCommand() {
+    _ = dlopen("/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote", RTLD_LAZY)
+    let environment = ProcessInfo.processInfo.environment
+    guard let pid = environment["VORSSAINT_NOW_PLAYING_PID"].flatMap(Int32.init),
+          let command = environment["VORSSAINT_NOW_PLAYING_COMMAND"].flatMap(Int32.init),
+          let app = NSRunningApplication(processIdentifier: pid),
+          var target = NotchNativePlayback.target(for: app) else {
+        emit(["error": "no player for pid"])
+        return
+    }
+    let done = DispatchSemaphore(value: 0)
+    var item: String?
+    NotchNativePlayback.readInfo(target, artwork: false, queue: DispatchQueue(label: "com.vorssaint.now-playing-command")) { info in
+        item = info?["kMRMediaRemoteNowPlayingInfoContentItemIdentifier"] as? String
+        done.signal()
+    }
+    guard done.wait(timeout: .now() + 2) == .success, let item else {
+        emit(["error": "no current item"])
+        return
+    }
+    target.itemIdentifier = item
+    target.allowsDirectCommands = true
+    var options: CFDictionary?
+    if command == 24 {
+        guard let position = environment["VORSSAINT_NOW_PLAYING_POSITION"].flatMap(Double.init),
+              let key = NotchNativePlayback.stringConstant("kMRMediaRemoteOptionPlaybackPosition") else {
+            emit(["error": "no position"])
+            return
+        }
+        options = [key: position] as CFDictionary
+    }
+    // Diagnostic send: same call as NotchNativePlayback.send, but reports why it failed.
+    typealias Send = @convention(c) (Int32, CFDictionary?, AnyObject, UInt32, DispatchQueue,
+        @escaping @convention(block) (UInt32, NSArray?) -> Void) -> Bool
+    let handle = dlopen("/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote", RTLD_LAZY)
+    guard let send = function(handle, "MRMediaRemoteSendCommandToPlayer", as: Send.self),
+          let itemKey = NotchNativePlayback.stringConstant("kMRMediaRemoteOptionNowPlayingContentItemID") else {
+        emit(["error": "send unavailable"]); return
+    }
+    for scopedToItem in [true, false] {
+        var scoped = (options as? [String: Any]) ?? [:]
+        if scopedToItem { scoped[itemKey] = item }
+        let finished = DispatchSemaphore(value: 0)
+        var errorCode: UInt32 = 999
+        var responses: [Int] = []
+        let accepted = send(command, scoped as CFDictionary, target.path, 0, DispatchQueue(label: "com.vorssaint.now-playing-send")) { error, reply in
+            errorCode = error
+            responses = (reply as? [NSNumber])?.map(\.intValue) ?? []
+            finished.signal()
+        }
+        _ = finished.wait(timeout: .now() + 2)
+        emit(["command": command, "scopedToItem": scopedToItem, "accepted": accepted, "error": errorCode, "responses": responses])
+        if errorCode == 0, responses.contains(0) { return }
+    }
+}
+
 /// One adapter process while a music surface is subscribed. Native change
 /// notifications replace polling; closing stdin also ends it if the app exits.
 @_cdecl("vorssaint_now_playing_watch")

@@ -10,11 +10,13 @@ use warnings;
 use DynaLoader;
 
 $| = 1;
-my ($library, $mode, $pid) = @ARGV;
+my ($library, $mode, $pid, $command, $position) = @ARGV;
 $mode //= "get";
-# EXPERIMENT: "app <pid>" reads one app's player.
+# EXPERIMENT: "app <pid>" reads one app's player; "command <pid> <id> [position]" sends to it.
 $ENV{VORSSAINT_NOW_PLAYING_PID} = $pid if defined $pid && $pid =~ /^\d+$/;
-my %entries = map { $_ => "vorssaint_now_playing_$_" } qw(get watch app);
+$ENV{VORSSAINT_NOW_PLAYING_COMMAND} = $command if defined $command && $command =~ /^\d+$/;
+$ENV{VORSSAINT_NOW_PLAYING_POSITION} = $position if defined $position && $position =~ /^[0-9.]+$/;
+my %entries = map { $_ => "vorssaint_now_playing_$_" } qw(get watch app command);
 die "now-playing: unknown mode\n" unless exists $entries{$mode};
 die "usage: now-playing.pl <adapter library>\n" unless defined $library && -f $library;
 my $handle = DynaLoader::dl_load_file($library, 0)
