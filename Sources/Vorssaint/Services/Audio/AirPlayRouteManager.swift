@@ -449,8 +449,18 @@ final class AirPlayRouteManager: NSObject, ObservableObject {
 
     /// P3: our renderer follows play/pause like a real player; the source app
     /// gets an explicit play or pause, never a toggle that could desync.
+    private var lastToggleAt: TimeInterval = 0
+
     private func handleRemote(_ command: Int32) {
         experimentLog("P3: received remote command \(command) (localPaused=\(localPaused))")
+        if command == 2 {
+            let now = ProcessInfo.processInfo.systemUptime
+            guard now - lastToggleAt > 0.5 else {
+                experimentLog("P5: ignored toggle within 0.5 s of the previous one")
+                return
+            }
+            lastToggleAt = now
+        }
         switch command {
         case 0: localResume(); forward(0, position: nil)
         case 1: localPause(); forward(1, position: nil)
@@ -467,9 +477,18 @@ final class AirPlayRouteManager: NSObject, ObservableObject {
         currentRenderer?.pausePlayback()
     }
 
+    /// P5: a fresh renderer + synchronizer, so the receiver sees a new stream
+    /// start; restarting the old timeline did not wake a session paused by the system.
     private func localResume() {
         localPaused = false
-        currentRenderer?.resumePlayback()
+        streamLock.lock()
+        defer { streamLock.unlock() }
+        guard airPlayRenderer != nil else { return }
+        airPlayRenderer?.stop()
+        airPlayRenderer = nil
+        mixerSource.discardBuffered()
+        startRendererIfNeeded()
+        experimentLog("P5: renderer recreated on resume (running=\(airPlayRenderer != nil))")
     }
 
     private func forward(_ command: Int32, position: Double?) {
@@ -917,6 +936,9 @@ final class AirPlayRenderer: @unchecked Sendable {
         started = false
         feedTimer?.cancel()
         feedTimer = nil
+        // Let an in-flight feed step finish, so a replacement renderer never
+        // reads the rings at the same time.
+        feedQueue.sync {}
         renderer.flush()
         synchronizer.rate = 0
     }
