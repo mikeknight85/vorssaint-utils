@@ -341,7 +341,7 @@ final class AirPlayRouteManager: NSObject, ObservableObject {
     }
 
     private func experimentStartMirror(pid: pid_t) {
-        experimentOptOutOfGlobalNowPlaying()
+        localPaused = false
         mirrorPID = pid
         installExperimentCommands()
         mirrorTimer?.invalidate()
@@ -361,10 +361,6 @@ final class AirPlayRouteManager: NSObject, ObservableObject {
     }
 
     private func mirrorRead() {
-        streamLock.lock()
-        let renderer = airPlayRenderer
-        streamLock.unlock()
-        renderer?.resumeIfStalled(reason: "mirror tick")
         let pid = mirrorPID
         guard pid > 0,
               let script = Bundle.main.url(forResource: "now-playing", withExtension: "pl"),
@@ -386,7 +382,8 @@ final class AirPlayRouteManager: NSObject, ObservableObject {
             return
         }
         let title = reply["kMRMediaRemoteNowPlayingInfoTitle"] as? String
-        let rate = reply["kMRMediaRemoteNowPlayingInfoPlaybackRate"] as? Double ?? 0
+        let sourceRate = reply["kMRMediaRemoteNowPlayingInfoPlaybackRate"] as? Double ?? 0
+        let rate = localPaused ? 0 : sourceRate
         var info: [String: Any] = [MPNowPlayingInfoPropertyMediaType: MPNowPlayingInfoMediaType.audio.rawValue,
                                    MPNowPlayingInfoPropertyPlaybackRate: rate]
         info[MPMediaItemPropertyTitle] = title
@@ -409,7 +406,10 @@ final class AirPlayRouteManager: NSObject, ObservableObject {
         }
         info[MPMediaItemPropertyArtwork] = mirrorArtwork
         center.nowPlayingInfo = info
-        center.playbackState = rate > 0 ? .playing : .paused
+        // EXPERIMENT E5: never claim .playing, so the source app stays the Mac's
+        // global Now Playing app (media keys, MediaRemote) while the AirPlay
+        // route still gets our metadata. The rate in the info carries the state.
+        center.playbackState = .paused
         if changed {
             experimentLog("P1: publishing '\(title ?? "-")' by '\(info[MPMediaItemPropertyArtist] ?? "-")' rate=\(rate) artwork=\(mirrorArtwork != nil) from \(reply["displayID"] ?? "?")")
         }
@@ -425,7 +425,7 @@ final class AirPlayRouteManager: NSObject, ObservableObject {
         for (command, identifier) in mapping {
             command.isEnabled = true
             command.addTarget { [weak self] _ in
-                self?.forward(identifier, position: nil)
+                self?.handleRemote(identifier)
                 return .success
             }
         }
@@ -437,24 +437,69 @@ final class AirPlayRouteManager: NSObject, ObservableObject {
         }
     }
 
+    private var localPaused = false
+    private var lastForwardAt: TimeInterval = 0
+
+    private var currentRenderer: AirPlayRenderer? {
+        streamLock.lock()
+        defer { streamLock.unlock() }
+        return airPlayRenderer
+    }
+
+    /// P3: our renderer follows play/pause like a real player; the source app
+    /// gets an explicit play or pause, never a toggle that could desync.
+    private func handleRemote(_ command: Int32) {
+        experimentLog("P3: received remote command \(command) (localPaused=\(localPaused))")
+        switch command {
+        case 0: localResume(); forward(0, position: nil)
+        case 1: localPause(); forward(1, position: nil)
+        case 2:
+            if localPaused { localResume(); forward(0, position: nil) } else { localPause(); forward(1, position: nil) }
+        default: forward(command, position: nil)
+        }
+        mirrorRead()
+    }
+
+    private func localPause() {
+        localPaused = true
+        currentRenderer?.pausePlayback()
+    }
+
+    private func localResume() {
+        localPaused = false
+        currentRenderer?.resumePlayback()
+    }
+
     private func forward(_ command: Int32, position: Double?) {
         let pid = mirrorPID
-        if command == 0 || command == 2 {
-            streamLock.lock()
-            let renderer = airPlayRenderer
-            streamLock.unlock()
-            renderer?.resumeIfStalled(reason: "play command")
+        // Loop guard 1: a command right after one we forwarded is most likely
+        // our own forward coming back through MediaRemote.
+        let now = ProcessInfo.processInfo.systemUptime
+        guard now - lastForwardAt > 0.8 else {
+            experimentLog("P3: dropped command \(command) (loop guard: within 0.8 s of the last forward)")
+            return
         }
+        lastForwardAt = now
         guard pid > 0,
               let script = Bundle.main.url(forResource: "now-playing", withExtension: "pl"),
               let library = Bundle.main.privateFrameworksURL?.appendingPathComponent("libVorssaintNowPlaying.dylib")
         else { return }
         mirrorQueue.async { [weak self] in
+            // Loop guard 2: while Vorssaint is the Mac's global Now Playing app,
+            // MediaRemote would hand the command straight back to us.
+            let global = BoundedProcessRunner.run("/usr/bin/perl", [script.path, library.path],
+                                                  timeout: 2.5, maxOutputBytes: 24 * 1_024 * 1_024)
+            let line = global.output.split(separator: UInt8(ascii: "\n")).last.map { Data($0) } ?? Data()
+            let globalPID = ((try? JSONSerialization.jsonObject(with: line)) as? [String: Any])?["pid"] as? Int
+            guard globalPID != Int(getpid()) else {
+                airPlayExperimentLog("P3: not forwarding command \(command): Vorssaint is the global Now Playing app")
+                return
+            }
             var arguments = [script.path, library.path, "command", String(pid), String(command)]
             if let position { arguments.append(String(format: "%.3f", position)) }
             let result = BoundedProcessRunner.run("/usr/bin/perl", arguments, timeout: 3, maxOutputBytes: 4_096)
             let reply = String(decoding: result.output, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
-            airPlayExperimentLog("P2: forwarded command \(command) position=\(position.map { String($0) } ?? "-") to pid \(pid): \(reply)")
+            airPlayExperimentLog("P3: forwarded command \(command) position=\(position.map { String($0) } ?? "-") to pid \(pid) (global Now Playing pid \(globalPID.map(String.init) ?? "?")): \(reply.replacingOccurrences(of: "\n", with: " | "))")
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { self?.mirrorRead() }
         }
     }
@@ -552,6 +597,13 @@ final class AudioRingBuffer: @unchecked Sendable {
         _ = OSAtomicAdd64Barrier(Int64(count), tail)
     }
 
+    /// Consumer: skips everything written so far.
+    func discardBuffered() {
+        let h = OSAtomicAdd64Barrier(0, head)
+        let t = OSAtomicAdd64Barrier(0, tail)
+        if t > h { _ = OSAtomicAdd64Barrier(t - h, head) }
+    }
+
     /// Consumer: Called from the AirPlay streaming feed queue.
     @discardableResult
     func read(into destination: UnsafeMutablePointer<Float>, frameCount: Int) -> Int {
@@ -584,6 +636,12 @@ final class LinearResampler: @unchecked Sendable {
 
     init(buffer: AudioRingBuffer) {
         self.buffer = buffer
+    }
+
+    func discard() {
+        buffer.discardBuffered()
+        carry.removeAll(keepingCapacity: true)
+        phase = 0
     }
 
     func read(into destination: UnsafeMutablePointer<Float>, frameCount: Int) {
@@ -667,6 +725,14 @@ final class MixingAudioSource: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return resamplers.isEmpty
+    }
+
+    /// Consumer side only: drops everything buffered in every lane.
+    func discardBuffered() {
+        lock.lock()
+        let lanes = Array(resamplers.values)
+        lock.unlock()
+        lanes.forEach { $0.discard() }
     }
 
     func readFrames(into buffer: UnsafeMutablePointer<Int16>, frameCount: Int) {
@@ -758,6 +824,27 @@ final class AirPlayRenderer: @unchecked Sendable {
 
     private func diagnose(_ event: String) {
         airPlayExperimentLog("R: \(event) rate=\(synchronizer.rate) time=\(String(format: "%.2f", synchronizer.currentTime().seconds)) next=\(String(format: "%.2f", nextPTS.seconds)) status=\(renderer.status.rawValue) error=\(renderer.error?.localizedDescription ?? "-")")
+    }
+
+    /// P3: stop the timeline like a paused player.
+    func pausePlayback() {
+        feedQueue.async { [self] in
+            guard started else { return }
+            synchronizer.rate = 0
+            diagnose("paused by command")
+        }
+    }
+
+    /// P3: drop what piled up while paused and restart the timeline from now.
+    func resumePlayback() {
+        feedQueue.async { [self] in
+            guard started else { return }
+            renderer.flush()
+            source.discardBuffered()
+            nextPTS = synchronizer.currentTime()
+            synchronizer.setRate(1.0, time: nextPTS)
+            diagnose("resumed by command")
+        }
     }
 
     /// EXPERIMENT: restarts the timeline if something else stopped it.
