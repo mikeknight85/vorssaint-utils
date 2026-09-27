@@ -789,6 +789,7 @@ final class AppVolumeMixer: ObservableObject {
             let clockUID = clockDeviceUIDForAirPlayTap()
             buildQueue.async { [weak self] in
                 let engine = AirPlayGainEngine(appID: app.id,
+                                               ownerPid: app.ownerPid,
                                                objects: app.audioObjects,
                                                gain: Float(app.volume),
                                                clockDeviceUID: clockUID)
@@ -2345,7 +2346,7 @@ private final class AirPlayGainEngine: GainEngine {
     private var ioProc: AudioDeviceIOProcID?
     private let ringBuffer: AudioRingBuffer
 
-    init?(appID: String, objects: [AudioObjectID], gain: Float, clockDeviceUID: String) {
+    init?(appID: String, ownerPid: pid_t, objects: [AudioObjectID], gain: Float, clockDeviceUID: String) {
         self.appID = appID
         self.tappedObjects = objects
         self.outputDeviceUID = AirPlayRouteManager.airPlaySentinelUID
@@ -2410,7 +2411,7 @@ private final class AirPlayGainEngine: GainEngine {
         }
 
         guard AudioDeviceStart(aggregateID, ioProc) == noErr,
-              AirPlayRouteManager.shared.addAudioStream(key: appID, buffer: ringBuffer) else {
+              AirPlayRouteManager.shared.addAudioStream(key: appID, buffer: ringBuffer, ownerPid: ownerPid) else {
             stop()
             return nil
         }

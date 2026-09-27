@@ -117,8 +117,10 @@ final class AirPlayRouteManager: NSObject, ObservableObject {
         let sharedSys = sel_registerName("sharedSystemAudioContext")
         let defaultShared = sel_registerName("defaultSharedOutputContext")
 
-        if let ctx = (msgClass(cls, sharedSys) ?? msgClass(cls, defaultShared)) as? NSObject {
+        let system = msgClass(cls, sharedSys)
+        if let ctx = (system ?? msgClass(cls, defaultShared)) as? NSObject {
             self.routingContext = ctx
+            experimentLog("E1: routing context = \(system != nil ? "sharedSystemAudioContext" : "defaultSharedOutputContext") \(ctx.value(forKey: "ID") ?? "?")")
         }
     }
 
@@ -274,13 +276,53 @@ final class AirPlayRouteManager: NSObject, ObservableObject {
     private let streamLock = NSLock()
 
     /// Adds an app's stream; false when no renderer could be started for it.
-    func addAudioStream(key: String, buffer: AudioRingBuffer) -> Bool {
+    func addAudioStream(key: String, buffer: AudioRingBuffer, ownerPid: pid_t) -> Bool {
         streamLock.lock()
         defer { streamLock.unlock() }
         startRendererIfNeeded()
         guard airPlayRenderer != nil else { return false }
         mixerSource.setBuffer(buffer, forKey: key)
+        DispatchQueue.main.async { [weak self] in self?.experimentLinkContext(toProcess: ownerPid) }
         return true
+    }
+
+    // MARK: - EXPERIMENT E1 (local only): tie the routing context to the routed app
+
+    private typealias MsgSendSetInt32 = @convention(c) (AnyObject, Selector, Int32) -> Void
+    private typealias MsgSendGetInt32 = @convention(c) (AnyObject, Selector) -> Int32
+
+    private func experimentLinkContext(toProcess pid: pid_t) {
+        guard let context = routingContext, let sym = msgSendSym else {
+            experimentLog("E1: no routing context")
+            return
+        }
+        let setSel = sel_registerName("setApplicationProcessID:")
+        let getSel = sel_registerName("applicationProcessID")
+        guard context.responds(to: setSel), context.responds(to: getSel) else {
+            experimentLog("E1: context does not respond to applicationProcessID")
+            return
+        }
+        let get = unsafeBitCast(sym, to: MsgSendGetInt32.self)
+        let before = get(context, getSel)
+        unsafeBitCast(sym, to: MsgSendSetInt32.self)(context, setSel, pid)
+        let after = get(context, getSel)
+        let app = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier ?? "?"
+        let id = context.value(forKey: "ID") ?? "?"
+        let type = context.value(forKey: "outputContextType") ?? "?"
+        experimentLog("E1: context \(id) type=\(type) applicationProcessID \(before) -> \(after) (asked \(pid), \(app)), speaker=\(cachedSpeakerName ?? "none")")
+    }
+
+    private func experimentLog(_ line: String) {
+        let url = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Logs/Vorssaint-airplay-experiment.log")
+        let stamped = "\(Date()) \(line)\n"
+        if let handle = try? FileHandle(forWritingTo: url) {
+            handle.seekToEndOfFile()
+            handle.write(Data(stamped.utf8))
+            try? handle.close()
+        } else {
+            try? Data(stamped.utf8).write(to: url)
+        }
     }
 
     func removeAudioStream(key: String) {
