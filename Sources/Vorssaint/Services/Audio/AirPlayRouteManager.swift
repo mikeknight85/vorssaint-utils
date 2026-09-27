@@ -406,10 +406,10 @@ final class AirPlayRouteManager: NSObject, ObservableObject {
         }
         info[MPMediaItemPropertyArtwork] = mirrorArtwork
         center.nowPlayingInfo = info
-        // EXPERIMENT E5: never claim .playing, so the source app stays the Mac's
-        // global Now Playing app (media keys, MediaRemote) while the AirPlay
-        // route still gets our metadata. The rate in the info carries the state.
-        center.playbackState = .paused
+        // E5 showed Vorssaint becomes the global Now Playing app anyway while it
+        // streams, so report the real state (lock screen, running time).
+        center.playbackState = rate > 0 ? .playing : .paused
+        lastSourceRate = sourceRate
         if changed {
             experimentLog("P1: publishing '\(title ?? "-")' by '\(info[MPMediaItemPropertyArtist] ?? "-")' rate=\(rate) artwork=\(mirrorArtwork != nil) from \(reply["displayID"] ?? "?")")
         }
@@ -438,6 +438,7 @@ final class AirPlayRouteManager: NSObject, ObservableObject {
     }
 
     private var localPaused = false
+    private var lastSourceRate: Double = 1
     private var lastForwardAt: TimeInterval = 0
 
     private var currentRenderer: AirPlayRenderer? {
@@ -454,7 +455,8 @@ final class AirPlayRouteManager: NSObject, ObservableObject {
         case 0: localResume(); forward(0, position: nil)
         case 1: localPause(); forward(1, position: nil)
         case 2:
-            if localPaused { localResume(); forward(0, position: nil) } else { localPause(); forward(1, position: nil) }
+            // Toggle from what the listener hears: paused locally or in the source app.
+            if localPaused || lastSourceRate == 0 { localResume(); forward(0, position: nil) } else { localPause(); forward(1, position: nil) }
         default: forward(command, position: nil)
         }
         mirrorRead()
@@ -480,28 +482,62 @@ final class AirPlayRouteManager: NSObject, ObservableObject {
             return
         }
         lastForwardAt = now
-        guard pid > 0,
-              let script = Bundle.main.url(forResource: "now-playing", withExtension: "pl"),
-              let library = Bundle.main.privateFrameworksURL?.appendingPathComponent("libVorssaintNowPlaying.dylib")
-        else { return }
+        // P4: Apple Events to the source app itself. MediaRemote would hand the
+        // command back to Vorssaint, which is the global Now Playing app while it streams.
+        guard pid > 0, let app = NSRunningApplication(processIdentifier: pid), let bundleURL = app.bundleURL,
+              let capabilities = NotchMusicAutomationCapabilities.load(bundleURL: bundleURL) else {
+            experimentLog("P4: command \(command) not forwarded: source app has no scripting dictionary")
+            return
+        }
         mirrorQueue.async { [weak self] in
-            // Loop guard 2: while Vorssaint is the Mac's global Now Playing app,
-            // MediaRemote would hand the command straight back to us.
-            let global = BoundedProcessRunner.run("/usr/bin/perl", [script.path, library.path],
-                                                  timeout: 2.5, maxOutputBytes: 24 * 1_024 * 1_024)
-            let line = global.output.split(separator: UInt8(ascii: "\n")).last.map { Data($0) } ?? Data()
-            let globalPID = ((try? JSONSerialization.jsonObject(with: line)) as? [String: Any])?["pid"] as? Int
-            guard globalPID != Int(getpid()) else {
-                airPlayExperimentLog("P3: not forwarding command \(command): Vorssaint is the global Now Playing app")
+            let address = NSAppleEventDescriptor(processIdentifier: pid)
+            // Asks once ("Vorssaint wants access to control …"); later calls answer immediately.
+            let permission = AEDeterminePermissionToAutomateTarget(address.aeDesc, typeWildCard, typeWildCard, true)
+            guard permission == noErr else {
+                airPlayExperimentLog("P4: command \(command) not forwarded: automation permission \(permission)")
                 return
             }
-            var arguments = [script.path, library.path, "command", String(pid), String(command)]
-            if let position { arguments.append(String(format: "%.3f", position)) }
-            let result = BoundedProcessRunner.run("/usr/bin/perl", arguments, timeout: 3, maxOutputBytes: 4_096)
-            let reply = String(decoding: result.output, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
-            airPlayExperimentLog("P3: forwarded command \(command) position=\(position.map { String($0) } ?? "-") to pid \(pid) (global Now Playing pid \(globalPID.map(String.init) ?? "?")): \(reply.replacingOccurrences(of: "\n", with: " | "))")
+            guard let event = Self.automationEvent(command, position: position, capabilities: capabilities, address: address) else {
+                airPlayExperimentLog("P4: command \(command) not supported by \(app.bundleIdentifier ?? "?")")
+                return
+            }
+            let reply = try? event.sendEvent(options: [.waitForReply, .neverInteract, .dontRecord], timeout: 2)
+            let error = reply?.paramDescriptor(forKeyword: keyErrorNumber)?.int32Value ?? (reply == nil ? -1 : 0)
+            airPlayExperimentLog("P4: sent command \(command) position=\(position.map { String($0) } ?? "-") to \(app.bundleIdentifier ?? "?") via Apple Events: error=\(error)")
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { self?.mirrorRead() }
         }
+    }
+
+    private static func automationEvent(_ command: Int32, position: Double?,
+                                        capabilities: NotchMusicAutomationCapabilities,
+                                        address: NSAppleEventDescriptor) -> NSAppleEventDescriptor? {
+        if command == 24 {
+            guard let seconds = position, seconds.isFinite, seconds >= 0, let property = capabilities.position else { return nil }
+            let specifier = NSAppleEventDescriptor.record()
+            specifier.setDescriptor(NSAppleEventDescriptor(typeCode: typeProperty), forKeyword: AEKeyword(keyAEDesiredClass))
+            specifier.setDescriptor(NSAppleEventDescriptor(enumCode: OSType(formPropertyID)), forKeyword: AEKeyword(keyAEKeyForm))
+            specifier.setDescriptor(NSAppleEventDescriptor(typeCode: property.code), forKeyword: AEKeyword(keyAEKeyData))
+            specifier.setDescriptor(NSAppleEventDescriptor.null(), forKeyword: AEKeyword(keyAEContainer))
+            guard let object = specifier.coerce(toDescriptorType: typeObjectSpecifier) else { return nil }
+            let event = NSAppleEventDescriptor(eventClass: kAECoreSuite, eventID: kAESetData, targetDescriptor: address,
+                                               returnID: AEReturnID(kAutoGenerateReturnID), transactionID: AETransactionID(kAnyTransactionID))
+            event.setParam(object, forKeyword: keyDirectObject)
+            event.setParam(property.integer ? NSAppleEventDescriptor(int32: Int32(seconds.rounded()))
+                           : NSAppleEventDescriptor(double: seconds), forKeyword: keyAEData)
+            return event
+        }
+        let code: NotchMusicAutomationCapabilities.Event?
+        switch command {
+        case 0: code = capabilities.commands["play"] ?? capabilities.commands["playpause"]
+        case 1: code = capabilities.commands["pause"] ?? capabilities.commands["playpause"]
+        case 2: code = capabilities.commands["playpause"]
+        case 4: code = capabilities.commands["next track"]
+        case 5: code = capabilities.commands["previous track"]
+        default: code = nil
+        }
+        guard let code else { return nil }
+        return NSAppleEventDescriptor(eventClass: code.eventClass, eventID: code.eventID, targetDescriptor: address,
+                                      returnID: AEReturnID(kAutoGenerateReturnID), transactionID: AETransactionID(kAnyTransactionID))
     }
 
     private func experimentLog(_ line: String) { airPlayExperimentLog(line) }
