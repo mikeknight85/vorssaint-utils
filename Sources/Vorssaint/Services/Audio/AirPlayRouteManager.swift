@@ -7,6 +7,7 @@ import AVKit
 import Combine
 import CoreMedia
 import Foundation
+import MediaPlayer
 import ObjectiveC
 
 /// Bridges macOS native AirPlay output routing into Vorssaint.
@@ -282,7 +283,7 @@ final class AirPlayRouteManager: NSObject, ObservableObject {
         startRendererIfNeeded()
         guard airPlayRenderer != nil else { return false }
         mixerSource.setBuffer(buffer, forKey: key)
-        DispatchQueue.main.async { [weak self] in self?.experimentLinkContext(toProcess: ownerPid) }
+        experimentLog("E2: stream added for pid \(ownerPid) (E1 link disabled)")
         return true
     }
 
@@ -312,6 +313,34 @@ final class AirPlayRouteManager: NSObject, ObservableObject {
         experimentLog("E1: context \(id) type=\(type) applicationProcessID \(before) -> \(after) (asked \(pid), \(app)), speaker=\(cachedSpeakerName ?? "none")")
     }
 
+    private var experimentCommandsInstalled = false
+
+    private func experimentPublishNowPlaying() {
+        let center = MPNowPlayingInfoCenter.default()
+        let icon = NSApp.applicationIconImage ?? NSImage()
+        let artwork = MPMediaItemArtwork(boundsSize: NSSize(width: 512, height: 512)) { _ in icon }
+        center.nowPlayingInfo = [
+            MPMediaItemPropertyTitle: "Vorssaint E2 test",
+            MPMediaItemPropertyArtist: "AirPlay experiment",
+            MPMediaItemPropertyAlbumTitle: "Vorssaint",
+            MPMediaItemPropertyArtwork: artwork,
+            MPMediaItemPropertyPlaybackDuration: 600.0,
+            MPNowPlayingInfoPropertyElapsedPlaybackTime: 0.0,
+            MPNowPlayingInfoPropertyPlaybackRate: 1.0,
+            MPNowPlayingInfoPropertyMediaType: MPNowPlayingInfoMediaType.audio.rawValue,
+        ]
+        center.playbackState = .playing
+        if !experimentCommandsInstalled {
+            experimentCommandsInstalled = true
+            let commands = MPRemoteCommandCenter.shared()
+            for command in [commands.playCommand, commands.pauseCommand, commands.togglePlayPauseCommand] {
+                command.isEnabled = true
+                command.addTarget { _ in .success }
+            }
+        }
+        experimentLog("E2: published Now Playing (state=\(center.playbackState.rawValue))")
+    }
+
     private func experimentLog(_ line: String) {
         let url = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Logs/Vorssaint-airplay-experiment.log")
@@ -336,6 +365,9 @@ final class AirPlayRouteManager: NSObject, ObservableObject {
 
     private func startRendererIfNeeded() {
         guard airPlayRenderer == nil else { return }
+        // EXPERIMENT E2: own the context before the renderer binds, then publish Now Playing.
+        experimentLinkContext(toProcess: getpid())
+        DispatchQueue.main.async { [weak self] in self?.experimentPublishNowPlaying() }
         guard let renderer = AirPlayRenderer(source: mixerSource, manager: self) else { return }
         renderer.start()
         self.airPlayRenderer = renderer
