@@ -327,6 +327,9 @@ enum NotchNativePlayback {
         return Bundle(url: url)?.object(forInfoDictionaryKey: "LSApplicationCategoryType") as? String == "public.app-category.music"
     }
 
+    /// EXPERIMENT: the active player of one app, for the AirPlay metadata mirror.
+    static func target(for app: NSRunningApplication) -> Target? { makeTarget(app) }
+
     private static func makeTarget(_ app: NSRunningApplication) -> Target? {
         guard !app.isTerminated, let identifier = app.bundleIdentifier,
               let pathClass = NSClassFromString("MRPlayerPath"),

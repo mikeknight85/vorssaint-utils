@@ -283,7 +283,8 @@ final class AirPlayRouteManager: NSObject, ObservableObject {
         startRendererIfNeeded()
         guard airPlayRenderer != nil else { return false }
         mixerSource.setBuffer(buffer, forKey: key)
-        experimentLog("E2: stream added for pid \(ownerPid) (E1 link disabled)")
+        experimentLog("P1: stream added for pid \(ownerPid)")
+        DispatchQueue.main.async { [weak self] in self?.experimentStartMirror(pid: ownerPid) }
         return true
     }
 
@@ -313,32 +314,97 @@ final class AirPlayRouteManager: NSObject, ObservableObject {
         experimentLog("E1: context \(id) type=\(type) applicationProcessID \(before) -> \(after) (asked \(pid), \(app)), speaker=\(cachedSpeakerName ?? "none")")
     }
 
-    private var experimentCommandsInstalled = false
+    // MARK: EXPERIMENT P1: mirror the routed app's Now Playing into ours
 
-    private func experimentPublishNowPlaying() {
+    private var experimentCommandsInstalled = false
+    private var mirrorPID: pid_t = 0
+    private var mirrorTimer: Timer?
+    private var mirrorArtworkKey: Int?
+    private var mirrorArtwork: MPMediaItemArtwork?
+    private let mirrorQueue = DispatchQueue(label: "com.vorssaint.airplay.now-playing-mirror", qos: .utility)
+
+    private func experimentStartMirror(pid: pid_t) {
+        mirrorPID = pid
+        installExperimentCommands()
+        mirrorTimer?.invalidate()
+        mirrorTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in self?.mirrorRead() }
+        mirrorRead()
+    }
+
+    private func experimentStopMirror() {
+        mirrorTimer?.invalidate()
+        mirrorTimer = nil
+        mirrorPID = 0
+        mirrorArtworkKey = nil
+        mirrorArtwork = nil
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+        MPNowPlayingInfoCenter.default().playbackState = .stopped
+        experimentLog("P1: mirror stopped")
+    }
+
+    private func mirrorRead() {
+        let pid = mirrorPID
+        guard pid > 0,
+              let script = Bundle.main.url(forResource: "now-playing", withExtension: "pl"),
+              let library = Bundle.main.privateFrameworksURL?.appendingPathComponent("libVorssaintNowPlaying.dylib")
+        else { return }
+        mirrorQueue.async { [weak self] in
+            let result = BoundedProcessRunner.run("/usr/bin/perl", [script.path, library.path, "app", String(pid)],
+                                                  timeout: 2.5, maxOutputBytes: 24 * 1_024 * 1_024)
+            let line = result.output.split(separator: UInt8(ascii: "\n")).last.map { Data($0) } ?? Data()
+            let reply = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any]
+            DispatchQueue.main.async { self?.mirrorPublish(reply, pid: pid, status: result.status, timedOut: result.timedOut) }
+        }
+    }
+
+    private func mirrorPublish(_ reply: [String: Any]?, pid: pid_t, status: Int32, timedOut: Bool) {
+        guard pid == mirrorPID else { return }
+        guard let reply, reply["error"] == nil else {
+            experimentLog("P1: read failed status=\(status) timedOut=\(timedOut) reply=\(String(describing: reply?["error"]))")
+            return
+        }
+        let title = reply["kMRMediaRemoteNowPlayingInfoTitle"] as? String
+        let rate = reply["kMRMediaRemoteNowPlayingInfoPlaybackRate"] as? Double ?? 0
+        var info: [String: Any] = [MPNowPlayingInfoPropertyMediaType: MPNowPlayingInfoMediaType.audio.rawValue,
+                                   MPNowPlayingInfoPropertyPlaybackRate: rate]
+        info[MPMediaItemPropertyTitle] = title
+        info[MPMediaItemPropertyArtist] = reply["kMRMediaRemoteNowPlayingInfoArtist"] as? String
+        info[MPMediaItemPropertyAlbumTitle] = reply["kMRMediaRemoteNowPlayingInfoAlbum"] as? String
+        info[MPMediaItemPropertyPlaybackDuration] = reply["kMRMediaRemoteNowPlayingInfoDuration"] as? Double
+        info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = reply["kMRMediaRemoteNowPlayingInfoElapsedTime"] as? Double
         let center = MPNowPlayingInfoCenter.default()
-        let icon = NSApp.applicationIconImage ?? NSImage()
-        let artwork = MPMediaItemArtwork(boundsSize: NSSize(width: 512, height: 512)) { _ in icon }
-        center.nowPlayingInfo = [
-            MPMediaItemPropertyTitle: "Vorssaint E2 test",
-            MPMediaItemPropertyArtist: "AirPlay experiment",
-            MPMediaItemPropertyAlbumTitle: "Vorssaint",
-            MPMediaItemPropertyArtwork: artwork,
-            MPMediaItemPropertyPlaybackDuration: 600.0,
-            MPNowPlayingInfoPropertyElapsedPlaybackTime: 0.0,
-            MPNowPlayingInfoPropertyPlaybackRate: 1.0,
-            MPNowPlayingInfoPropertyMediaType: MPNowPlayingInfoMediaType.audio.rawValue,
-        ]
-        center.playbackState = .playing
-        if !experimentCommandsInstalled {
-            experimentCommandsInstalled = true
-            let commands = MPRemoteCommandCenter.shared()
-            for command in [commands.playCommand, commands.pauseCommand, commands.togglePlayPauseCommand] {
-                command.isEnabled = true
-                command.addTarget { _ in .success }
+        let changed = (center.nowPlayingInfo?[MPMediaItemPropertyTitle] as? String) != title
+        if changed, reply["artworkBase64"] == nil {
+            mirrorArtworkKey = nil
+            mirrorArtwork = nil
+        }
+        if let base64 = reply["artworkBase64"] as? String {
+            let key = base64.hashValue
+            if key != mirrorArtworkKey, let data = Data(base64Encoded: base64), let image = NSImage(data: data) {
+                mirrorArtworkKey = key
+                mirrorArtwork = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
             }
         }
-        experimentLog("E2: published Now Playing (state=\(center.playbackState.rawValue))")
+        info[MPMediaItemPropertyArtwork] = mirrorArtwork
+        center.nowPlayingInfo = info
+        center.playbackState = rate > 0 ? .playing : .paused
+        if changed {
+            experimentLog("P1: publishing '\(title ?? "-")' by '\(info[MPMediaItemPropertyArtist] ?? "-")' rate=\(rate) artwork=\(mirrorArtwork != nil) from \(reply["displayID"] ?? "?")")
+        }
+    }
+
+    private func installExperimentCommands() {
+        guard !experimentCommandsInstalled else { return }
+        experimentCommandsInstalled = true
+        let commands = MPRemoteCommandCenter.shared()
+        for command in [commands.playCommand, commands.pauseCommand, commands.togglePlayPauseCommand,
+                        commands.nextTrackCommand, commands.previousTrackCommand] {
+            command.isEnabled = true
+            command.addTarget { [weak self] event in
+                self?.experimentLog("P1: remote command \(event.command) (not forwarded in prototype)")
+                return .success
+            }
+        }
     }
 
     private func experimentLog(_ line: String) {
@@ -365,9 +431,7 @@ final class AirPlayRouteManager: NSObject, ObservableObject {
 
     private func startRendererIfNeeded() {
         guard airPlayRenderer == nil else { return }
-        // EXPERIMENT E2: own the context before the renderer binds, then publish Now Playing.
-        experimentLinkContext(toProcess: getpid())
-        DispatchQueue.main.async { [weak self] in self?.experimentPublishNowPlaying() }
+        // EXPERIMENT E2b: no applicationProcessID link; Now Playing is mirrored instead.
         guard let renderer = AirPlayRenderer(source: mixerSource, manager: self) else { return }
         renderer.start()
         self.airPlayRenderer = renderer
@@ -376,6 +440,7 @@ final class AirPlayRouteManager: NSObject, ObservableObject {
     private func stopRenderer() {
         airPlayRenderer?.stop()
         airPlayRenderer = nil
+        DispatchQueue.main.async { [weak self] in self?.experimentStopMirror() }
     }
 }
 

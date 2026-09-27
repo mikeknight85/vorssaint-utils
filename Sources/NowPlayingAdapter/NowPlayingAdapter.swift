@@ -192,6 +192,44 @@ public func vorssaintNowPlayingGet() {
     if watching { NotchNativeQueue.observe(snapshot) }
 }
 
+/// EXPERIMENT: one line of Now Playing info for the app whose pid is in
+/// VORSSAINT_NOW_PLAYING_PID, read from that app's own player.
+@_cdecl("vorssaint_now_playing_app")
+public func vorssaintNowPlayingApp() {
+    // MRPlayerPath / MRClient only resolve once MediaRemote is loaded.
+    _ = dlopen("/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote", RTLD_LAZY)
+    guard let raw = ProcessInfo.processInfo.environment["VORSSAINT_NOW_PLAYING_PID"],
+          let pid = Int32(raw),
+          let app = NSRunningApplication(processIdentifier: pid),
+          let target = NotchNativePlayback.target(for: app) else {
+        emit(["error": "no player for pid"])
+        return
+    }
+    let done = DispatchSemaphore(value: 0)
+    var reply: [String: Any] = ["pid": pid, "displayID": app.bundleIdentifier ?? ""]
+    NotchNativePlayback.readInfo(target, artwork: true, queue: DispatchQueue(label: "com.vorssaint.now-playing-app")) { info in
+        let info = (info as? [String: Any]) ?? [:]
+        for key in ["kMRMediaRemoteNowPlayingInfoTitle", "kMRMediaRemoteNowPlayingInfoArtist",
+                    "kMRMediaRemoteNowPlayingInfoAlbum"] {
+            if let value = info[key] as? String { reply[key] = value }
+        }
+        for key in ["kMRMediaRemoteNowPlayingInfoDuration", "kMRMediaRemoteNowPlayingInfoElapsedTime",
+                    "kMRMediaRemoteNowPlayingInfoPlaybackRate"] {
+            if let value = (info[key] as? NSNumber)?.doubleValue { reply[key] = value }
+        }
+        if let artwork = info["kMRMediaRemoteNowPlayingInfoArtworkData"] as? Data,
+           !artwork.isEmpty, artwork.count <= maximumArtworkBytes {
+            reply["artworkBase64"] = artwork.base64EncodedString()
+        }
+        done.signal()
+    }
+    guard done.wait(timeout: .now() + 2) == .success else {
+        emit(["error": "metadata timeout"])
+        return
+    }
+    emit(reply)
+}
+
 /// One adapter process while a music surface is subscribed. Native change
 /// notifications replace polling; closing stdin also ends it if the app exits.
 @_cdecl("vorssaint_now_playing_watch")
