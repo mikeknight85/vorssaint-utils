@@ -194,11 +194,13 @@ final class AirPlayRouteManager: NSObject, ObservableObject {
         win.level = .popUpMenu // Appears on top of all panels and notch, never underneath
         win.hasShadow = false
         win.isReleasedWhenClosed = false
+        // Over a full-screen app too, like the panel's own anchor.
+        win.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
 
         if let picker = makeRoutePickerView() {
             picker.frame = NSRect(x: 0, y: 0, width: 20, height: 20)
             win.contentView?.addSubview(picker)
-            win.orderFront(nil)
+            win.orderFrontRegardless()
             self.fallbackWindow = win
             self.fallbackPicker = picker
 
@@ -347,6 +349,15 @@ final class AirPlayRouteManager: NSObject, ObservableObject {
     /// locally, and builds stop being retried. Picking again clears it.
     private var streamingFailedFor: String?
 
+    /// Main thread. A renderer already replaced reports nothing about the
+    /// speaker the current one plays to.
+    private func rendererFailed(_ renderer: AirPlayRenderer) {
+        streamLock.lock()
+        let current = airPlayRenderer === renderer
+        streamLock.unlock()
+        if current { reportStreamingFailure() }
+    }
+
     /// Main thread: a build could not get a renderer.
     func reportStreamingFailure() {
         dispatchPrecondition(condition: .onQueue(.main))
@@ -387,7 +398,10 @@ final class AirPlayRouteManager: NSObject, ObservableObject {
         // A renderer that fails or stops taking audio leaves the tapped apps
         // silent everywhere; reported like one that could not start, they
         // fall back to the Mac until the speaker is picked again.
-        renderer.onFailure = { [weak self] in self?.reportStreamingFailure() }
+        renderer.onFailure = { [weak self, weak renderer] in
+            guard let self, let renderer else { return }
+            self.rendererFailed(renderer)
+        }
         renderer.start()
         self.airPlayRenderer = renderer
     }
@@ -847,17 +861,18 @@ final class MixingAudioSource: @unchecked Sendable {
     }
 }
 
-/// Tells when a renderer has stopped taking audio for good: it failed, or it
-/// has not been ready for more far longer than a speaker takes to connect.
-/// Reports once.
+/// Tells when a renderer has stopped taking audio for good: it failed, or,
+/// once playback got going, it has not been ready for more far longer than a
+/// hiccup lasts. A speaker still connecting, however slowly, has not played
+/// yet. Reports once.
 struct AirPlayRendererWatch {
     static let stallLimit: TimeInterval = 10
     private var lastReady: TimeInterval?
     private var reported = false
 
-    mutating func shouldReport(failed: Bool, ready: Bool, now: TimeInterval) -> Bool {
+    mutating func shouldReport(failed: Bool, ready: Bool, playing: Bool, now: TimeInterval) -> Bool {
         guard !reported else { return false }
-        if ready || lastReady == nil { lastReady = now }
+        if ready || !playing || lastReady == nil { lastReady = now }
         guard failed || now - (lastReady ?? now) > Self.stallLimit else { return false }
         reported = true
         return true
@@ -932,6 +947,7 @@ final class AirPlayRenderer: @unchecked Sendable {
 
     private func provide() {
         if watch.shouldReport(failed: renderer.status == .failed, ready: renderer.isReadyForMoreMediaData,
+                              playing: CMTimeGetSeconds(synchronizer.currentTime()) > 0.1,
                               now: ProcessInfo.processInfo.systemUptime) {
             let failure = onFailure
             DispatchQueue.main.async { failure?() }
@@ -999,7 +1015,10 @@ extension AirPlayRouteManager: AVRoutePickerViewDelegate {
 
     func routePickerViewDidEndPresentingRoutes(_ routePickerView: AVRoutePickerView) {
         let generation = pickerGeneration
-        if routePickerView === fallbackPicker {
+        // A picker already replaced, its window gone, leaves the flag to the
+        // one presenting now.
+        let isCurrent = routePickerView === fallbackPicker
+        if isCurrent {
             // Asynchronously, so AppKit finishes tearing the picker down first.
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.fallbackPicker === routePickerView else { return }
@@ -1020,6 +1039,7 @@ extension AirPlayRouteManager: AVRoutePickerViewDelegate {
         }
         // Stays set a moment, so the click that closed the list does not also
         // close the panel. A list opened again meanwhile keeps it set.
+        guard isCurrent else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
             guard let self, self.pickerGeneration == generation else { return }
             Self.isPresentingPicker = false

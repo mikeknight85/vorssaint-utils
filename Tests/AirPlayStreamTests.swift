@@ -40,26 +40,38 @@ enum AirPlayRingBufferContract {
                      "of more channels only the first two are kept, frame by frame")
     }
 
-    /// A renderer that fails, or stops taking audio far longer than a speaker
-    /// takes to connect, is reported once so its apps fall back to the Mac.
+    /// A renderer that fails, or stops taking audio far longer than a hiccup
+    /// once playback got going, is reported once so its apps fall back to the
+    /// Mac. A speaker still connecting is never taken for a stall.
     private static func rendererWatch(_ suite: TestSuite) {
         var failing = AirPlayRendererWatch()
-        suite.expect(!failing.shouldReport(failed: false, ready: true, now: 0)
-                        && failing.shouldReport(failed: true, ready: true, now: 1)
-                        && !failing.shouldReport(failed: true, ready: false, now: 2),
+        suite.expect(!failing.shouldReport(failed: false, ready: true, playing: false, now: 0)
+                        && failing.shouldReport(failed: true, ready: true, playing: false, now: 1)
+                        && !failing.shouldReport(failed: true, ready: false, playing: true, now: 2),
                      "a failed renderer is reported, and only once")
 
         var stalling = AirPlayRendererWatch()
         let limit = AirPlayRendererWatch.stallLimit
-        suite.expect(!stalling.shouldReport(failed: false, ready: false, now: 0)
-                        && !stalling.shouldReport(failed: false, ready: false, now: limit - 1)
-                        && stalling.shouldReport(failed: false, ready: false, now: limit + 1),
-                     "a renderer that takes no audio for longer than the limit is reported")
+        suite.expect(!stalling.shouldReport(failed: false, ready: false, playing: true, now: 0)
+                        && !stalling.shouldReport(failed: false, ready: false, playing: true, now: limit - 1)
+                        && stalling.shouldReport(failed: false, ready: false, playing: true, now: limit + 1),
+                     "a playing renderer that takes no audio for longer than the limit is reported")
+
+        var connecting = AirPlayRendererWatch()
+        var reportedWhileConnecting = false
+        for second in stride(from: 0.0, through: limit * 4, by: 1) {
+            reportedWhileConnecting = reportedWhileConnecting
+                || connecting.shouldReport(failed: false, ready: false, playing: false, now: second)
+        }
+        suite.expect(!reportedWhileConnecting
+                        && !connecting.shouldReport(failed: false, ready: false, playing: true, now: limit * 4 + 1),
+                     "a speaker that takes long to connect is not a stall, and the limit starts once it plays")
 
         var busy = AirPlayRendererWatch()
         var reported = false
         for second in stride(from: 0.0, through: limit * 3, by: 1) {
-            reported = reported || busy.shouldReport(failed: false, ready: Int(second) % 4 == 0, now: second)
+            reported = reported || busy.shouldReport(failed: false, ready: Int(second) % 4 == 0, playing: true,
+                                                     now: second)
         }
         suite.expect(!reported, "a renderer that keeps taking audio now and then is never reported")
     }
@@ -447,7 +459,7 @@ enum AirPlayAvailabilityContract {
                                             pickerCanBind: picker, rendererCanBind: renderer)
         }
         suite.expect(available(), "AirPlay is offered when every piece is present")
-        suite.expect(!available(mixer: false), "not before the mixer is supported (macOS 14.4)")
+        suite.expect(!available(mixer: false), "not on a system it was not tried on (before macOS 27)")
         suite.expect(!available(context: false), "not without the routing context")
         suite.expect(!available(id: nil) && !available(id: ""), "not when the context id cannot be read")
         suite.expect(!available(picker: false), "not when the picker cannot be bound to the context")

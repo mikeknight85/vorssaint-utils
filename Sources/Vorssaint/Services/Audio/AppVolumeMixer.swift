@@ -716,11 +716,16 @@ final class AppVolumeMixer: ObservableObject {
 
     func setOutputDeviceUID(_ uid: String?, for app: MixerApp) {
         guard !app.isBypassed else { return }
+        if uid == MixerRoutingSupport.airPlaySpeakerChoiceID {
+            chooseAirPlaySpeaker(for: app)
+            return
+        }
         engineRecovery.clear(app.id)
         let sanitized = Defaults.sanitizedAppOutputDeviceUID(uid)
         persistOutputDeviceUID(sanitized, for: app)
         if let sanitized, MixerRoutingSupport.isAirPlaySentinel(sanitized), !AirPlayRouteManager.shared.isConnected {
-            AirPlayRouteManager.shared.presentPicker()
+            // After the menu that asked for it closes, so the list opens at the pointer.
+            DispatchQueue.main.async { AirPlayRouteManager.shared.presentPicker() }
         }
         if let index = apps.firstIndex(where: { $0.id == app.id }) {
             apps[index].selectedOutputDeviceUID = sanitized
@@ -734,6 +739,18 @@ final class AppVolumeMixer: ObservableObject {
             // for the new device first and only then stops this one, so the
             // sound never falls back to the old output in between.
             applyRouting(for: apps[index])
+        }
+    }
+
+    /// Choosing a speaker from an app's menu sends that app to AirPlay too,
+    /// and opens the speaker list even while one is already picked.
+    private func chooseAirPlaySpeaker(for app: MixerApp) {
+        let routed = app.selectedOutputDeviceUID.map(MixerRoutingSupport.isAirPlaySentinel) == true
+        let connected = AirPlayRouteManager.shared.isConnected
+        // Without a speaker, routing the app opens the list on its own.
+        if !routed { setOutputDeviceUID(AirPlayRouteManager.airPlaySentinelUID, for: app) }
+        if routed || connected {
+            DispatchQueue.main.async { AirPlayRouteManager.shared.presentPicker() }
         }
     }
 
@@ -931,7 +948,13 @@ final class AppVolumeMixer: ObservableObject {
         guard #available(macOS 14.4, *), let token = builds.begin(app.id) else { return }
 
         if MixerRoutingSupport.isAirPlaySentinel(targetOutputDeviceUID) {
-            let clockUID = clockDeviceUIDForAirPlayTap()
+            // Without a listed Mac output to clock it, the engine would count
+            // as gone on every pass. A device list without one is a passing
+            // state, and the next refresh builds again.
+            guard let clockUID = clockDeviceUIDForAirPlayTap() else {
+                builds.finish(app.id, token: token)
+                return
+            }
             buildQueue.async { [weak self] in
                 // No renderer, no stream: the app stays on its current path
                 // instead of being tapped into silence, and this is not a
@@ -983,14 +1006,12 @@ final class AppVolumeMixer: ObservableObject {
         AirPlayRouteManager.shared.reportStreamingFailure()
     }
 
-    private func clockDeviceUIDForAirPlayTap() -> String {
-        if let current = currentOutputDeviceUID, !MixerRoutingSupport.isAirPlaySentinel(current) {
-            return current
-        }
-        if let hardware = outputDevices.first(where: { !MixerRoutingSupport.isAirPlaySentinel($0.uid) })?.uid {
-            return hardware
-        }
-        return "BuiltInSpeakerDevice"
+    /// A listed Mac output, the current one when it is listed: an engine
+    /// counts as gone once its clock is no longer listed.
+    private func clockDeviceUIDForAirPlayTap() -> String? {
+        let hardware = outputDevices.map(\.uid).filter { !MixerRoutingSupport.isAirPlaySentinel($0) }
+        if let current = currentOutputDeviceUID, hardware.contains(current) { return current }
+        return hardware.first
     }
 
     /// Lands one finished build on the main thread.
@@ -1589,9 +1610,15 @@ final class AppVolumeMixer: ObservableObject {
                 engineRenderProgress.removeValue(forKey: id)
             }
 
+            // An AirPlay engine whose clock output went away keeps its route
+            // and objects, so the output's presence is checked on its own.
+            let outputIsPresent = MixerRoutingSupport.engineOutputIsPresent(
+                engine.outputDeviceUID, clockUID: engine.clockDeviceUID,
+                listedUIDs: outputDevices.map(\.uid), airPlayConnected: AirPlayRouteManager.isSpeakerConnected)
             guard engine.tappedObjects != app.audioObjects
                 || engine.outputDeviceUID != app.effectiveOutputDeviceUID
-                || !appNeedsEngine(app) else { continue }
+                || !appNeedsEngine(app)
+                || !outputIsPresent else { continue }
 
             engineChangeAt[id] = now
             guard appNeedsEngine(app) else {
@@ -1602,10 +1629,7 @@ final class AppVolumeMixer: ObservableObject {
             // An engine rendering to a device that is gone (headphones just
             // unplugged) can only mute the app, so it goes right away; every
             // other rebuild keeps its tap until the replacement is running.
-            if !MixerRoutingSupport.engineOutputIsPresent(engine.outputDeviceUID,
-                                                          clockUID: engine.clockDeviceUID,
-                                                          listedUIDs: outputDevices.map(\.uid),
-                                                          airPlayConnected: AirPlayRouteManager.isSpeakerConnected) {
+            if !outputIsPresent {
                 engines.removeValue(forKey: id)?.stop()
                 engineRenderProgress.removeValue(forKey: id)
             }

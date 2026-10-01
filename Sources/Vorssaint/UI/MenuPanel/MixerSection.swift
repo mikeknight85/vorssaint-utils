@@ -1089,11 +1089,6 @@ private struct MixerRow: View {
         Binding(
             get: { app.selectedOutputDeviceUID ?? MixerRoutingSupport.systemDefaultSelectionID },
             set: { selection in
-                guard selection != MixerRoutingSupport.airPlaySpeakerChoiceID else {
-                    // After the menu closes, so the speaker list opens at the pointer.
-                    DispatchQueue.main.async { AirPlayRouteManager.shared.presentPicker() }
-                    return
-                }
                 mixer.setOutputDeviceUID(selection == MixerRoutingSupport.systemDefaultSelectionID ? nil : selection,
                                          for: app)
             }
