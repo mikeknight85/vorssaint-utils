@@ -11,6 +11,57 @@ enum AirPlayRingBufferContract {
         roundTrip(suite)
         fullRingDropsNewestFrames(suite)
         positionsPastThirtyTwoBits(suite)
+        otherChannelLayouts(suite)
+        rendererWatch(suite)
+    }
+
+    /// The tap index can hand back a lone buffer that does not have the tap's
+    /// two channels. Read as stereo, a mono one would run past its end on the
+    /// IO thread.
+    private static func otherChannelLayouts(_ suite: TestSuite) {
+        let mono = AudioRingBuffer(sampleRate: 48_000, capacityFrames: 64)
+        let monoInput: [Float] = [1, 2, 3, 4]
+        monoInput.withUnsafeBufferPointer { mono.write(frames: $0.baseAddress!, frameCount: 4, channels: 1, gain: 1) }
+        var monoOutput = [Float](repeating: 0, count: 4 * 2)
+        let monoRead = monoOutput.withUnsafeMutableBufferPointer { mono.read(into: $0.baseAddress!, frameCount: 4) }
+        suite.expect(monoRead == 4 && monoOutput == [1, 1, 2, 2, 3, 3, 4, 4],
+                     "a mono buffer plays on both sides and is read only as far as it goes")
+
+        let surround = AudioRingBuffer(sampleRate: 48_000, capacityFrames: 64)
+        let surroundInput: [Float] = [1, -1, 9, 9, 2, -2, 9, 9]
+        surroundInput.withUnsafeBufferPointer {
+            surround.write(frames: $0.baseAddress!, frameCount: 2, channels: 4, gain: 1)
+        }
+        var surroundOutput = [Float](repeating: 0, count: 2 * 2)
+        let surroundRead = surroundOutput.withUnsafeMutableBufferPointer {
+            surround.read(into: $0.baseAddress!, frameCount: 2)
+        }
+        suite.expect(surroundRead == 2 && surroundOutput == [1, -1, 2, -2],
+                     "of more channels only the first two are kept, frame by frame")
+    }
+
+    /// A renderer that fails, or stops taking audio far longer than a speaker
+    /// takes to connect, is reported once so its apps fall back to the Mac.
+    private static func rendererWatch(_ suite: TestSuite) {
+        var failing = AirPlayRendererWatch()
+        suite.expect(!failing.shouldReport(failed: false, ready: true, now: 0)
+                        && failing.shouldReport(failed: true, ready: true, now: 1)
+                        && !failing.shouldReport(failed: true, ready: false, now: 2),
+                     "a failed renderer is reported, and only once")
+
+        var stalling = AirPlayRendererWatch()
+        let limit = AirPlayRendererWatch.stallLimit
+        suite.expect(!stalling.shouldReport(failed: false, ready: false, now: 0)
+                        && !stalling.shouldReport(failed: false, ready: false, now: limit - 1)
+                        && stalling.shouldReport(failed: false, ready: false, now: limit + 1),
+                     "a renderer that takes no audio for longer than the limit is reported")
+
+        var busy = AirPlayRendererWatch()
+        var reported = false
+        for second in stride(from: 0.0, through: limit * 3, by: 1) {
+            reported = reported || busy.shouldReport(failed: false, ready: Int(second) % 4 == 0, now: second)
+        }
+        suite.expect(!reported, "a renderer that keeps taking audio now and then is never reported")
     }
 
     private static func frames(_ count: Int, from start: Int) -> [Float] {
@@ -117,6 +168,16 @@ enum AirPlayRouteContract {
                      && !MixerRoutingSupport.engineOutputIsPresent("UnpluggedHeadphones", listedUIDs: listed,
                                                                    airPlayConnected: true),
                      "other outputs count as present exactly while they are listed")
+        // The Mac output clocking an AirPlay stream, gone (headphones turned
+        // off), stops its tap: the engine is rebuilt on the output there now.
+        suite.expect(MixerRoutingSupport.engineOutputIsPresent(sentinel, clockUID: "HeadsetOutput", listedUIDs: listed,
+                                                               airPlayConnected: true)
+                     && !MixerRoutingSupport.engineOutputIsPresent(sentinel, clockUID: "UnpluggedHeadphones",
+                                                                   listedUIDs: listed, airPlayConnected: true),
+                     "an AirPlay engine counts as gone once the output clocking it is gone")
+        suite.expect(MixerRoutingSupport.engineOutputIsPresent("HeadsetOutput", clockUID: "UnpluggedHeadphones",
+                                                               listedUIDs: listed, airPlayConnected: false),
+                     "only an AirPlay engine depends on a clock output")
     }
 
     /// The AirPlay entry stays listed while no speaker is picked; the app's

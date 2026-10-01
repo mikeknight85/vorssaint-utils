@@ -23,13 +23,10 @@ final class AirPlayRouteManager: NSObject, ObservableObject {
     @Published private(set) var isAvailable: Bool = false
     @Published private(set) var isConnected: Bool = false
     @Published private(set) var activeSpeakerName: String?
-    /// Main thread. Static so the panel's dismissal check can read them
+    /// Main thread. Static so the panel's dismissal check can read it
     /// without creating the manager, which loads the private routing stack:
     /// a Vorssaint without the mixer must not pay for AirPlay at all.
     private(set) static var isPresentingPicker = false
-    /// Whether an AirPlay picker was ever shown in this session. Only then
-    /// can an outside click belong to its out-of-process content.
-    private(set) static var hasPresentedPicker = false
 
     /// What the mixer's device refresh needs, readable from its HAL queue
     /// without creating the manager (which must happen on the main thread).
@@ -64,9 +61,6 @@ final class AirPlayRouteManager: NSObject, ObservableObject {
 
     private var routingContext: NSObject?
     private var routingContextID: String?
-    /// Every header picker currently alive: the panel and Settings each host
-    /// one, and either may be the one on screen.
-    private let headerPickers = NSHashTable<NSView>.weakObjects()
     /// The backup check, scheduled only while a stream is live.
     private var pollTimer: Timer?
     private var contextObservers: [NSObjectProtocol] = []
@@ -82,13 +76,18 @@ final class AirPlayRouteManager: NSObject, ObservableObject {
     private override init() {
         dispatchPrecondition(condition: .onQueue(.main))
         super.init()
-        dlopen("/System/Library/Frameworks/AVKit.framework/AVKit", RTLD_NOW)
-        dlopen("/System/Library/Frameworks/AVFoundation.framework/AVFoundation", RTLD_NOW)
-        setupContext()
-        let mixerSupported: Bool
-        if #available(macOS 14.4, *) { mixerSupported = true } else { mixerSupported = false }
+        // The private routing objects exist on older systems too, but only on
+        // macOS 27 was the shared context seen to stay apart from the Mac's
+        // own route and the renderer seen to reach the speaker.
+        let systemSupported: Bool
+        if #available(macOS 27, *) { systemSupported = true } else { systemSupported = false }
+        if systemSupported {
+            dlopen("/System/Library/Frameworks/AVKit.framework/AVKit", RTLD_NOW)
+            dlopen("/System/Library/Frameworks/AVFoundation.framework/AVFoundation", RTLD_NOW)
+            setupContext()
+        }
         self.isAvailable = AirPlayAvailability.isAvailable(
-            mixerSupported: mixerSupported,
+            mixerSupported: systemSupported,
             hasContext: routingContext != nil,
             contextID: routingContextID,
             pickerCanBind: AVRoutePickerView.instancesRespond(to: sel_registerName("setOutputContextID:")),
@@ -156,7 +155,7 @@ final class AirPlayRouteManager: NSObject, ObservableObject {
     /// Creates an `AVRoutePickerView` bound to the routing context, or nil
     /// when it cannot be bound: an unbound picker works on the whole Mac's
     /// audio route, so it is never handed out.
-    func makeRoutePickerView(isActive: Bool = true) -> NSView? {
+    private func makeRoutePickerView() -> AVRoutePickerView? {
         guard isAvailable, let contextID = routingContextID, let sym = msgSendSym else { return nil }
         let picker = AVRoutePickerView()
         let msgObj = unsafeBitCast(sym, to: MsgSendObj.self)
@@ -164,42 +163,23 @@ final class AirPlayRouteManager: NSObject, ObservableObject {
         guard picker.responds(to: setCtxSel) else { return nil }
         msgObj(picker, setCtxSel, contextID as AnyObject)
         picker.delegate = self
-        if isActive {
-            headerPickers.add(picker)
-        }
         return picker
-    }
-
-    /// Returns true if an active picker view exists to anchor `presentPicker`.
-    var canPresentPicker: Bool {
-        visibleHeaderPicker != nil
-    }
-
-    /// A header picker the user can actually see. A closed panel or Settings
-    /// window keeps its window object, so having a window is not enough.
-    private var visibleHeaderPicker: NSView? {
-        headerPickers.allObjects.first { picker in
-            guard let window = picker.window else { return false }
-            return window.isVisible && window.occlusionState.contains(.visible)
-        }
     }
 
     private var fallbackWindow: NSWindow?
     /// The picker hosted in `fallbackWindow`; its delegate callback closes the window.
     private weak var fallbackPicker: AVRoutePickerView?
+    /// Tells a picker that is presenting now from one whose late callbacks
+    /// arrive after another took its place.
+    private var pickerGeneration = 0
 
-    /// Programmatically opens the system route picker anchored to the active picker view,
-    /// or anchors an invisible transient popup at the mouse cursor if no UI picker is currently mounted.
+    /// Opens the system's speaker list at the pointer, where the choice that
+    /// asked for it was made: an app's output menu in the panel, Settings or
+    /// the island. A transparent window anchors it there.
     func presentPicker() {
         // Nothing to pick with, and no reason to create the anchor window.
         guard isAvailable else { return }
-        if let picker = visibleHeaderPicker, let button = findButton(in: picker) {
-            button.performClick(nil)
-            return
-        }
-
-        fallbackWindow?.orderOut(nil)
-        fallbackWindow = nil
+        closePickerWindow()
 
         let mouseLoc = NSEvent.mouseLocation
         let win = NSWindow(
@@ -215,25 +195,32 @@ final class AirPlayRouteManager: NSObject, ObservableObject {
         win.hasShadow = false
         win.isReleasedWhenClosed = false
 
-        if let picker = makeRoutePickerView(isActive: false) {
+        if let picker = makeRoutePickerView() {
             picker.frame = NSRect(x: 0, y: 0, width: 20, height: 20)
             win.contentView?.addSubview(picker)
             win.orderFront(nil)
             self.fallbackWindow = win
-            self.fallbackPicker = picker as? AVRoutePickerView
+            self.fallbackPicker = picker
 
-            // Watchdog to ensure temporary window is cleaned up eventually
+            // A list left open this long, or one whose end was never reported,
+            // still goes, and the panel stops treating clicks as the picker's.
             DispatchQueue.main.asyncAfter(deadline: .now() + 180) { [weak self, weak win] in
-                if self?.fallbackWindow === win {
-                    win?.orderOut(nil)
-                    self?.fallbackWindow = nil
-                }
+                guard let self, let win, self.fallbackWindow === win else { return }
+                self.closePickerWindow()
             }
 
             if let button = findButton(in: picker) {
                 button.performClick(nil)
             }
         }
+    }
+
+    private func closePickerWindow() {
+        fallbackWindow?.orderOut(nil)
+        fallbackWindow = nil
+        fallbackPicker = nil
+        pickerGeneration += 1
+        Self.isPresentingPicker = false
     }
 
     private func findButton(in view: NSView) -> NSButton? {
@@ -397,6 +384,10 @@ final class AirPlayRouteManager: NSObject, ObservableObject {
     private func startRendererIfNeeded() {
         guard airPlayRenderer == nil else { return }
         guard let renderer = AirPlayRenderer(source: mixerSource, manager: self) else { return }
+        // A renderer that fails or stops taking audio leaves the tapped apps
+        // silent everywhere; reported like one that could not start, they
+        // fall back to the Mac until the speaker is picked again.
+        renderer.onFailure = { [weak self] in self?.reportStreamingFailure() }
         renderer.start()
         self.airPlayRenderer = renderer
     }
@@ -638,7 +629,10 @@ final class AudioRingBuffer: @unchecked Sendable {
     private var tail: UnsafeMutablePointer<Int64> { positions + 1 }
 
     /// Producer: Called from Core Audio realtime IO thread. Zero allocations, no locks.
-    func write(frames: UnsafePointer<Float>, frameCount: Int, gain: Float) {
+    /// `frames` holds `channels` interleaved samples per frame: a mono source
+    /// plays on both sides, and only the first two of more channels are kept.
+    func write(frames: UnsafePointer<Float>, frameCount: Int, channels: Int = 2, gain: Float) {
+        guard channels > 0 else { return }
         let t = OSAtomicAdd64Barrier(0, tail)
         let h = OSAtomicAdd64Barrier(0, head)
         let used = min(capacityFrames, max(0, Int(t - h)))
@@ -646,10 +640,12 @@ final class AudioRingBuffer: @unchecked Sendable {
         guard count > 0 else { return }
 
         let mask = Int64(capacityFrames - 1)
+        let right = min(1, channels - 1)
         for i in 0..<count {
             let slot = Int((t + Int64(i)) & mask) * 2
-            storage[slot] = frames[i * 2] * gain
-            storage[slot + 1] = frames[i * 2 + 1] * gain
+            let frame = i * channels
+            storage[slot] = frames[frame] * gain
+            storage[slot + 1] = frames[frame + right] * gain
         }
         _ = OSAtomicAdd64Barrier(Int64(count), tail)
     }
@@ -851,12 +847,33 @@ final class MixingAudioSource: @unchecked Sendable {
     }
 }
 
+/// Tells when a renderer has stopped taking audio for good: it failed, or it
+/// has not been ready for more far longer than a speaker takes to connect.
+/// Reports once.
+struct AirPlayRendererWatch {
+    static let stallLimit: TimeInterval = 10
+    private var lastReady: TimeInterval?
+    private var reported = false
+
+    mutating func shouldReport(failed: Bool, ready: Bool, now: TimeInterval) -> Bool {
+        guard !reported else { return false }
+        if ready || lastReady == nil { lastReady = now }
+        guard failed || now - (lastReady ?? now) > Self.stallLimit else { return false }
+        reported = true
+        return true
+    }
+}
+
 /// Streams 44.1 kHz Int16 stereo audio to the selected AirPlay device via AVSampleBufferAudioRenderer.
 final class AirPlayRenderer: @unchecked Sendable {
     private let source: MixingAudioSource
     private let renderer = AVSampleBufferAudioRenderer()
     private let synchronizer = AVSampleBufferRenderSynchronizer()
     private let feed = AirPlayFeedDriver()
+    /// Set before `start()`; called on the main thread, once.
+    var onFailure: (() -> Void)?
+    /// Feed queue only.
+    private var watch = AirPlayRendererWatch()
 
     private let formatDescription: CMAudioFormatDescription
     private let sampleRate: Double = 44_100
@@ -914,6 +931,11 @@ final class AirPlayRenderer: @unchecked Sendable {
     private let targetLookahead = 0.75
 
     private func provide() {
+        if watch.shouldReport(failed: renderer.status == .failed, ready: renderer.isReadyForMoreMediaData,
+                              now: ProcessInfo.processInfo.systemUptime) {
+            let failure = onFailure
+            DispatchQueue.main.async { failure?() }
+        }
         // A feed that fell behind the playback clock would enqueue late
         // chunks back to back; restart the timeline just ahead of it instead.
         let now = synchronizer.currentTime()
@@ -971,11 +993,12 @@ extension AirPlayRouteManager: AVRoutePickerViewDelegate {
     func routePickerViewWillBeginPresentingRoutes(_ routePickerView: AVRoutePickerView) {
         // Picking again is a fresh try at streaming.
         streamingFailedFor = nil
+        pickerGeneration += 1
         Self.isPresentingPicker = true
-        Self.hasPresentedPicker = true
     }
 
     func routePickerViewDidEndPresentingRoutes(_ routePickerView: AVRoutePickerView) {
+        let generation = pickerGeneration
         if routePickerView === fallbackPicker {
             // Asynchronously, so AppKit finishes tearing the picker down first.
             DispatchQueue.main.async { [weak self] in
@@ -995,8 +1018,10 @@ extension AirPlayRouteManager: AVRoutePickerViewDelegate {
                 self?.refreshActiveDevice()
             }
         }
-        // Keep flag briefly active so any click that dismissed the picker does not simultaneously drop the panel
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+        // Stays set a moment, so the click that closed the list does not also
+        // close the panel. A list opened again meanwhile keeps it set.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+            guard let self, self.pickerGeneration == generation else { return }
             Self.isPresentingPicker = false
         }
     }

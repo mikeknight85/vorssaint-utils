@@ -1012,16 +1012,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
         ) { [weak self] _ in
             guard let self, self.popover.isShown else { return }
             guard !PanelInteractionState.shared.preventsPopoverDismissal else { return }
-            let mouseLoc = NSEvent.mouseLocation
-            guard self.statusController.containsStatusItem(at: mouseLoc) == false else { return }
-            // Content hosted out of process in our windows (the system AirPlay route
-            // picker) reaches this monitor too; only a click the window server gave
-            // to one of our windows keeps the panel open. Asked only once such a
-            // picker has been shown, so everyone else keeps the plain behaviour.
-            if AirPlayRouteManager.hasPresentedPicker,
-               PopoverDismissSupport.clickLandedInOwnWindow(at: mouseLoc) {
-                return
-            }
+            guard self.statusController.containsStatusItem(at: NSEvent.mouseLocation) == false else { return }
             self.closePopover(reason: .outsideClick)
         }
 

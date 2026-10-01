@@ -119,6 +119,10 @@ final class AppVolumeMixer: ObservableObject {
     /// process discovery. A feature transition restarts the listener set when
     /// this mode changes, so priority-only operation never scans processes.
     private var processMonitoringEnabled = false
+    /// Whether this mixer started AirPlay tracking. Only then is there a
+    /// manager to stop: creating one loads the private routing stack, which
+    /// audio priority and the output switcher alone never need.
+    private var airPlayActive = false
     /// The global HAL listeners (devices, default output, process list), kept
     /// so stop() can remove each one again when the mixer leaves the hub.
     private var globalListeners: [AudioObjectPropertySelector] = []
@@ -208,6 +212,7 @@ final class AppVolumeMixer: ObservableObject {
             AirPlayRouteManager.shared.activate { [weak self] in
                 self?.refreshApps()
             }
+            airPlayActive = true
         }
         guard !listenerInstalled else {
             refreshApps()
@@ -275,7 +280,10 @@ final class AppVolumeMixer: ObservableObject {
             NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
             self.wakeObserver = nil
         }
-        AirPlayRouteManager.shared.deactivate()
+        if airPlayActive {
+            AirPlayRouteManager.shared.deactivate()
+            airPlayActive = false
+        }
         if !apps.isEmpty { apps = [] }
         if !hiddenApps.isEmpty { hiddenApps = [] }
         if !outputDevices.isEmpty { outputDevices = [] }
@@ -1002,6 +1010,7 @@ final class AppVolumeMixer: ObservableObject {
             // device that is gone, in which case it can only mute the app.
             if let running = engines[id],
                !MixerRoutingSupport.engineOutputIsPresent(running.outputDeviceUID,
+                                                          clockUID: running.clockDeviceUID,
                                                           listedUIDs: outputDevices.map(\.uid),
                                                           airPlayConnected: AirPlayRouteManager.isSpeakerConnected) {
                 discardEngine(for: id)
@@ -1594,6 +1603,7 @@ final class AppVolumeMixer: ObservableObject {
             // unplugged) can only mute the app, so it goes right away; every
             // other rebuild keeps its tap until the replacement is running.
             if !MixerRoutingSupport.engineOutputIsPresent(engine.outputDeviceUID,
+                                                          clockUID: engine.clockDeviceUID,
                                                           listedUIDs: outputDevices.map(\.uid),
                                                           airPlayConnected: AirPlayRouteManager.isSpeakerConnected) {
                 engines.removeValue(forKey: id)?.stop()
@@ -2153,6 +2163,9 @@ private protocol GainEngine: AnyObject {
     var gain: Float { get set }
     var tappedObjects: [AudioObjectID] { get }
     var outputDeviceUID: String { get }
+    /// The hardware output that clocks an engine streaming elsewhere (AirPlay),
+    /// nil for an engine that plays on `outputDeviceUID` itself.
+    var clockDeviceUID: String? { get }
     /// How many IO callbacks the engine has completed. A count that stops
     /// moving while the tapped app is playing means the aggregate is no
     /// longer rendering, so the tap can only mute (issue #341).
@@ -2167,6 +2180,7 @@ private protocol GainEngine: AnyObject {
 private final class TapGainEngine: GainEngine {
     let tappedObjects: [AudioObjectID]
     let outputDeviceUID: String
+    var clockDeviceUID: String? { nil }
     var gain: Float {
         get { gainBox.value }
         set { gainBox.value = min(max(newValue, 0), Float(AppVolumeMixer.maxVolume)) }
@@ -2469,6 +2483,7 @@ private final class TapGainEngine: GainEngine {
 private final class AirPlayGainEngine: GainEngine {
     let tappedObjects: [AudioObjectID]
     let outputDeviceUID: String
+    let clockDeviceUID: String?
     private let appID: String
 
     private final class AtomicFloatBox {
@@ -2514,6 +2529,7 @@ private final class AirPlayGainEngine: GainEngine {
         self.appID = appID
         self.tappedObjects = objects
         self.outputDeviceUID = AirPlayRouteManager.airPlaySentinelUID
+        self.clockDeviceUID = clockDeviceUID
         self.gainBox = AtomicFloatBox(gain)
 
         let description = CATapDescription(stereoMixdownOfProcesses: objects)
@@ -2562,6 +2578,7 @@ private final class AirPlayGainEngine: GainEngine {
                 return
             }
 
+            let channels = Int(inputBuffers[tapIndex].mNumberChannels)
             let frames = MixerRender.frames(bytes: inputBuffers[tapIndex].mDataByteSize,
                                             channels: inputBuffers[tapIndex].mNumberChannels)
             guard frames > 0 else { return }
@@ -2569,7 +2586,9 @@ private final class AirPlayGainEngine: GainEngine {
 
             let currentGain = box.value
             if currentGain > 0.0001 {
-                ring.write(frames: data, frameCount: frames, gain: currentGain)
+                // The buffer's own layout: the lone buffer the tap index
+                // falls back to may not have the tap's two channels.
+                ring.write(frames: data, frameCount: frames, channels: channels, gain: currentGain)
             }
         }) == noErr else {
             // Fully initialized from here, so deinit calls stop() again; one

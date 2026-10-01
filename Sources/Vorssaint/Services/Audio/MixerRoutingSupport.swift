@@ -254,13 +254,21 @@ enum MixerRoutingSupport {
         uid == AirPlayRouteManager.airPlaySentinelUID
     }
 
+    /// The item in an app's output menu that opens the system's speaker list
+    /// for every app set to AirPlay, without changing this app's output.
+    static let airPlaySpeakerChoiceID = "vorssaint.output.airplay.choose"
+
     /// Whether a running engine's output is still there to render to. The
     /// AirPlay entry stays listed while no speaker is picked, but an engine
     /// streaming to it then only mutes its app, exactly like one whose
-    /// device was unplugged, so it counts as gone.
-    static func engineOutputIsPresent(_ uid: String, listedUIDs: [String], airPlayConnected: Bool) -> Bool {
+    /// device was unplugged, so it counts as gone. So does one whose clock,
+    /// the Mac output it was built on, is gone: its tap stops with it, and
+    /// the replacement is built on the output there now.
+    static func engineOutputIsPresent(_ uid: String, clockUID: String? = nil, listedUIDs: [String],
+                                      airPlayConnected: Bool) -> Bool {
         guard listedUIDs.contains(uid) else { return false }
-        return !isAirPlaySentinel(uid) || airPlayConnected
+        guard isAirPlaySentinel(uid) else { return true }
+        return airPlayConnected && clockUID.map(listedUIDs.contains) != false
     }
 
     /// Whether an app's output menu needs its own "Output unavailable" row for

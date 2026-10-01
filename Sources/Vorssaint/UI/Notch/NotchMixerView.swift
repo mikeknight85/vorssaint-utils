@@ -591,6 +591,10 @@ private struct NotchAppFader: View {
                                                                  listedUIDs: mixer.outputDevices.map(\.uid)) {
                     Text(l10n.s.mixerOutputUnavailable).tag(selected)
                 }
+                if mixer.outputDevices.contains(where: { MixerRoutingSupport.isAirPlaySentinel($0.uid) }) {
+                    Divider()
+                    Text(l10n.s.mixerAirPlayChooseSpeaker).tag(MixerRoutingSupport.airPlaySpeakerChoiceID)
+                }
             }
             .pickerStyle(.menu)
             Divider()
@@ -607,6 +611,11 @@ private struct NotchAppFader: View {
         Binding(
             get: { app.selectedOutputDeviceUID ?? MixerRoutingSupport.systemDefaultSelectionID },
             set: { selection in
+                guard selection != MixerRoutingSupport.airPlaySpeakerChoiceID else {
+                    // After the menu closes, so the speaker list opens at the pointer.
+                    DispatchQueue.main.async { AirPlayRouteManager.shared.presentPicker() }
+                    return
+                }
                 mixer.setOutputDeviceUID(selection == MixerRoutingSupport.systemDefaultSelectionID ? nil : selection,
                                          for: app)
             }
