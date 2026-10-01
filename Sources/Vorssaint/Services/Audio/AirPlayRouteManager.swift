@@ -861,19 +861,26 @@ final class MixingAudioSource: @unchecked Sendable {
     }
 }
 
-/// Tells when a renderer has stopped taking audio for good: it failed, or,
-/// once playback got going, it has not been ready for more far longer than a
-/// hiccup lasts. A speaker still connecting, however slowly, has not played
-/// yet. Reports once.
+/// Tells when a renderer has stopped taking audio for good: it failed, it
+/// never started playing, or, once playback got going, it has not been ready
+/// for more far longer than a hiccup lasts. A speaker that is slow to connect
+/// gets far longer than one that stops mid-stream. Reports once.
 struct AirPlayRendererWatch {
     static let stallLimit: TimeInterval = 10
+    static let startLimit: TimeInterval = 60
+    private var startedAt: TimeInterval?
     private var lastReady: TimeInterval?
+    private var hasPlayed = false
     private var reported = false
 
     mutating func shouldReport(failed: Bool, ready: Bool, playing: Bool, now: TimeInterval) -> Bool {
         guard !reported else { return false }
+        if startedAt == nil { startedAt = now }
+        hasPlayed = hasPlayed || playing
         if ready || !playing || lastReady == nil { lastReady = now }
-        guard failed || now - (lastReady ?? now) > Self.stallLimit else { return false }
+        let stalled = now - (lastReady ?? now) > Self.stallLimit
+        let neverStarted = !hasPlayed && now - (startedAt ?? now) > Self.startLimit
+        guard failed || stalled || neverStarted else { return false }
         reported = true
         return true
     }

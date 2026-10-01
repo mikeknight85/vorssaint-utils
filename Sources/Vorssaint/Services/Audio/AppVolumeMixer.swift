@@ -1610,15 +1610,15 @@ final class AppVolumeMixer: ObservableObject {
                 engineRenderProgress.removeValue(forKey: id)
             }
 
+            let listedUIDs = outputDevices.map(\.uid)
             // An AirPlay engine whose clock output went away keeps its route
-            // and objects, so the output's presence is checked on its own.
-            let outputIsPresent = MixerRoutingSupport.engineOutputIsPresent(
-                engine.outputDeviceUID, clockUID: engine.clockDeviceUID,
-                listedUIDs: outputDevices.map(\.uid), airPlayConnected: AirPlayRouteManager.isSpeakerConnected)
+            // and objects, so that clock is checked on its own. Only that:
+            // an engine on a default the list hides is otherwise left alone.
+            let clockIsGone = engine.clockDeviceUID.map { !listedUIDs.contains($0) } == true
             guard engine.tappedObjects != app.audioObjects
                 || engine.outputDeviceUID != app.effectiveOutputDeviceUID
                 || !appNeedsEngine(app)
-                || !outputIsPresent else { continue }
+                || clockIsGone else { continue }
 
             engineChangeAt[id] = now
             guard appNeedsEngine(app) else {
@@ -1629,7 +1629,10 @@ final class AppVolumeMixer: ObservableObject {
             // An engine rendering to a device that is gone (headphones just
             // unplugged) can only mute the app, so it goes right away; every
             // other rebuild keeps its tap until the replacement is running.
-            if !outputIsPresent {
+            if !MixerRoutingSupport.engineOutputIsPresent(engine.outputDeviceUID,
+                                                          clockUID: engine.clockDeviceUID,
+                                                          listedUIDs: listedUIDs,
+                                                          airPlayConnected: AirPlayRouteManager.isSpeakerConnected) {
                 engines.removeValue(forKey: id)?.stop()
                 engineRenderProgress.removeValue(forKey: id)
             }

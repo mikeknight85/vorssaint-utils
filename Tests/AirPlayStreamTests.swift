@@ -67,6 +67,13 @@ enum AirPlayRingBufferContract {
                         && !connecting.shouldReport(failed: false, ready: false, playing: true, now: limit * 4 + 1),
                      "a speaker that takes long to connect is not a stall, and the limit starts once it plays")
 
+        var silent = AirPlayRendererWatch()
+        let start = AirPlayRendererWatch.startLimit
+        suite.expect(!silent.shouldReport(failed: false, ready: true, playing: false, now: 0)
+                        && !silent.shouldReport(failed: false, ready: true, playing: false, now: start - 1)
+                        && silent.shouldReport(failed: false, ready: true, playing: false, now: start + 1),
+                     "a speaker that never starts playing is reported, after far longer than a slow connection")
+
         var busy = AirPlayRendererWatch()
         var reported = false
         for second in stride(from: 0.0, through: limit * 3, by: 1) {
