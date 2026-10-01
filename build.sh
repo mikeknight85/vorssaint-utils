@@ -282,6 +282,7 @@ if (( TEST )); then
         Sources/Vorssaint/Services/AgentUsage/AgentLogParser.swift
         Sources/Vorssaint/Services/AgentUsage/AgentUsageSummary.swift
         Sources/Vorssaint/Services/AgentUsage/AgentUsageStore.swift
+        Sources/Vorssaint/Services/AgentUsage/AgentUsageArchive.swift
         Sources/Vorssaint/Services/AgentUsage/AgentClaudeAppUsage.swift
         Sources/Vorssaint/Services/AgentUsage/AgentCodexServer.swift
         Sources/Vorssaint/Services/Notch/NotchGestureSupport.swift
@@ -296,6 +297,7 @@ if (( TEST )); then
         Sources/Vorssaint/Services/Notch/NotchVolumeKeyGate.swift
         Sources/Vorssaint/Services/Notch/NotchMusicSupport.swift
         Sources/Vorssaint/UI/Notch/NotchEqualizerBars.swift
+        Sources/Vorssaint/UI/Notch/NotchScrollEdgeFade.swift
         Sources/Vorssaint/UI/Notch/NotchAgentAnimationView.swift
         Sources/Vorssaint/UI/WindowVisibilityReader.swift
         Sources/Vorssaint/Services/Notch/NotchMusicAutomationSupport.swift
@@ -355,6 +357,7 @@ if (( TEST )); then
         Sources/Vorssaint/Services/Recorder/RecorderTextRenderer.swift
         Sources/Vorssaint/Services/Recorder/RecorderImageRenderer.swift
         Sources/Vorssaint/Services/Recorder/RecorderExporter.swift
+        Sources/Vorssaint/Services/Recorder/RecorderGIFClipboard.swift
         Sources/Vorssaint/Services/Recorder/RecorderComposition.swift
         Sources/Vorssaint/Services/Recorder/RecordingSharingSupport.swift
         Sources/Vorssaint/Services/PrivateFileStore.swift
